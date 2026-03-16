@@ -1,7 +1,7 @@
 # Extensions Phase 1: _extension.yml Parsing and Metadata Contributions
 
 **Created**: 2026-03-16
-**Status**: In Progress (Phases 1.1-1.5 complete, 1.6-1.8 remaining)
+**Status**: In Progress (1.1-1.5 complete; 1.4b, 1.6-1.8 remaining)
 **Parent Plan**: `claude-notes/plans/2026-03-16-extensions-master-plan.md`
 
 ## Codebase Context for New Agents
@@ -416,6 +416,75 @@ submodules for types, reading, and discovery.
   - "unknown" → no extension, base = "unknown"
   - "foo-bar" (bar not a known format) → no extension, base = "foo-bar"
 
+### Phase 1.4b: Format String Preservation (BLOCKER)
+
+The extension metadata merge layer (Phase 1.5) is currently dead code because the
+original format string (e.g., `"acm-html"`) is lost when `Format` is constructed.
+The pipeline only sees the base format `"html"`, so `build_extension_metadata_layer`
+never finds a matching extension.
+
+**TS Quarto reference** (confirmed via DeepWiki):
+- TS Quarto uses `parseFormatString()` in `pandoc-formats.ts` → `FormatDescriptor`
+- The `Format` object carries a `FormatIdentifier` with fields:
+  - `base-format` ("pdf") — the Pandoc output format
+  - `target-format` ("acm-pdf") — the full format string from YAML
+  - `extension-name` ("acm") — just the extension part
+  - `display-name` — human-readable name
+- `readExtensionFormat()` uses the descriptor to look up extension metadata
+
+**Our approach**: Mirror TS Quarto's `FormatIdentifier` fields on our `Format` struct.
+
+- [ ] **1.4b.1** Add fields to `Format` struct (`format.rs`):
+  ```rust
+  pub struct Format {
+      pub identifier: FormatIdentifier,   // existing: the base format enum
+      pub target_format: String,          // NEW: full format string, e.g. "acm-pdf"
+      pub extension_name: Option<String>, // NEW: extension part, e.g. Some("acm")
+      pub display_name: String,           // NEW: human-readable, e.g. "ACM PDF"
+      pub output_extension: String,       // existing
+      pub native_pipeline: bool,          // existing
+  }
+  ```
+
+- [ ] **1.4b.2** Update `Format` constructors (`Format::html()`, `Format::pdf()`, etc.)
+  to populate the new fields with sensible defaults:
+  ```rust
+  Format::html() → target_format: "html", extension_name: None, display_name: "HTML"
+  Format::pdf()  → target_format: "pdf",  extension_name: None, display_name: "PDF"
+  ```
+
+- [ ] **1.4b.3** Add `Format::from_descriptor()` constructor:
+  ```rust
+  /// Create a Format from a format string like "acm-html" or "html".
+  /// Uses parse_format_descriptor() to split extension from base format.
+  pub fn from_format_string(format_str: &str) -> Self
+  ```
+  This replaces the private `format_from_name()` in `render_to_file.rs`.
+
+- [ ] **1.4b.4** Update `format_from_name()` in `render_to_file.rs` (lines 310-317)
+  to call `Format::from_format_string()`.
+
+- [ ] **1.4b.5** Update `MetadataMergeStage::run()` to use `ctx.format.target_format`
+  instead of `ctx.format.identifier.as_str()` when calling
+  `build_extension_metadata_layer()`. This is the line that currently reads:
+  ```rust
+  let target_format = ctx.format.identifier.as_str();
+  ```
+
+- [ ] **1.4b.6** Update smoke test harness (`quarto-test/src/runner.rs`) if it
+  constructs `Format` directly — it should use the new constructor.
+
+- [ ] **1.4b.7** Write tests:
+  - `Format::from_format_string("html")` → identifier=Html, target_format="html",
+    extension_name=None, display_name="HTML"
+  - `Format::from_format_string("acm-pdf")` → identifier=Pdf, target_format="acm-pdf",
+    extension_name=Some("acm"), display_name="acm-pdf"
+  - `Format::from_format_string("my-journal-html")` → identifier=Html,
+    target_format="my-journal-html", extension_name=Some("my-journal")
+  - Existing `Format::html()` etc. still work unchanged
+  - Integration: MetadataMergeStage with extension + format "acm-html" now applies
+    extension metadata (currently fails because format string is lost)
+
 ### Phase 1.5: Extension Metadata Merge into Pipeline
 
 This is the key integration point. Extension metadata must be inserted as a new
@@ -503,34 +572,31 @@ layer in `MetadataMergeStage`.
   - No extensions found → existing behavior unchanged (regression test)
   - Multiple extensions contributing to same format → merge in discovery order
 
-### Phase 1.6: format-resources Support
+### Phase 1.6: format-resources Support (DEFERRED)
 
-- [ ] **1.6.1** During extension reading, resolve `format-resources` glob patterns:
-  - Read `format-resources` array from each format config
-  - Resolve globs relative to extension directory
-  - Store resolved absolute paths in the format's ConfigValue (replace the
-    glob strings with resolved paths)
+**Deferred to a later PR.** format-resources requires glob resolution, pipeline
+resource copying, and possibly a new crate dependency. It's only needed for
+extensions that bundle CSS/CLS/other files, which is not required for the core
+extension metadata flow to work end-to-end.
 
-- [ ] **1.6.2** Add format-resources copying to the pipeline:
-  - After metadata merge, check merged metadata for `format-resources`
-  - Copy listed files to the output directory
-  - Track in artifact store
-
-  **Open question**: Where in the pipeline should this happen? Probably as part
-  of a new `ResolveResourcesStage` or within `ApplyTemplateStage`. For Phase 1,
-  keep it simple — add resource copying to the end of the pipeline or to the
-  existing artifact management.
-
-- [ ] **1.6.3** Write tests:
-  - Extension with `format-resources: ["style.css"]` → file copied to output
-  - Glob pattern `format-resources: ["*.cls"]` → matching files copied
-  - Missing file → warning, not error
+Tracked items (for future work):
+- Resolve `format-resources` glob patterns during `read_extension()`
+- Add resource copying step in the pipeline (design TBD)
+- Tests for file copying, glob patterns, missing files
 
 ### Phase 1.7: Smoke Tests
 
-- [ ] **1.7.1** Create a smoke test directory:
+**Depends on**: Phase 1.4b (format string preservation)
+
+Smoke tests auto-discover `.qmd` files under `crates/quarto/tests/smoke-all/`.
+The format key under `_quarto.tests` is passed to `render_to_file()`. Each test
+directory needs a `_quarto.yml` for project context (required for extension
+discovery to walk the directory tree).
+
+- [ ] **1.7.1** Create smoke test directory structure:
   ```
   crates/quarto/tests/smoke-all/extensions/
+  ├── _quarto.yml                          # needed for project context
   ├── simple-metadata/
   │   ├── _extensions/
   │   │   └── test-meta/
@@ -554,16 +620,17 @@ layer in `MetadataMergeStage`.
           toc: true
           number-sections: true
     ```
-  - `test.qmd`:
+  - `test.qmd` — note: the `_quarto.tests` format key must be the extension
+    format name `test-meta-html`, which the test harness passes to
+    `render_to_file()`:
     ```yaml
     ---
-    format: test-meta-html
     title: Test
     _quarto:
       tests:
-        html:
+        test-meta-html:
           ensureHtmlElements:
-            - ["nav#TOC", "TOC should be present from extension metadata"]
+            - ["nav#TOC"]
     ---
     ## Section 1
     Content here.
@@ -585,6 +652,45 @@ layer in `MetadataMergeStage`.
 ---
 
 ## Implementation Notes
+
+### TS Quarto Vocabulary (confirmed via DeepWiki)
+
+Aligning our naming with TS Quarto for consistency:
+
+| Concept | TS Quarto name | Our Rust name |
+|---------|---------------|---------------|
+| Full format string | "format string" | `target_format: String` |
+| Parsed format parts | `FormatDescriptor` | `FormatDescriptor` (in `discover.rs`) |
+| Extension part of format | `extension` | `extension_name: Option<String>` |
+| Base Pandoc format | `baseFormat` | `FormatIdentifier` enum / `base_format` |
+| Identity fields on Format | `FormatIdentifier` (TS interface) | Fields on `Format` struct |
+| Human label | `display-name` | `display_name: String` |
+
+TS Quarto's `FormatIdentifier` interface (in `config/types.ts`):
+```typescript
+interface FormatIdentifier {
+  "base-format"?: string;     // "pdf"
+  "target-format"?: string;   // "acm-pdf"
+  "display-name"?: string;    // "ACM PDF"
+  "extension-name"?: string;  // "acm"
+}
+```
+
+TS Quarto's `FormatDescriptor` (in `pandoc-formats.ts`):
+```typescript
+interface FormatDescriptor {
+  baseFormat: string;          // "pdf"
+  extension?: string;          // "acm"
+  variants: string[];          // Pandoc +/- variants
+  modifiers: string[];         // Additional modifiers
+  formatWithVariants: string;  // baseFormat + variants
+}
+```
+
+Key TS functions:
+- `parseFormatString()` — splits "acm-pdf" into FormatDescriptor
+- `readExtensionFormat()` — finds extension, reads contributes.formats metadata
+- `resolveFormats()` — merges extension metadata into format config
 
 ### ConfigValue as extension metadata
 
@@ -722,24 +828,27 @@ use the `NativeRuntime` or similar concrete implementation — grep for
 
 ## Files to Create/Modify
 
-| File | Action | Description |
-|------|--------|-------------|
-| `crates/quarto-core/src/extension/mod.rs` | Create | Module root, public API |
-| `crates/quarto-core/src/extension/types.rs` | Create | Extension, ExtensionId, Contributes structs |
-| `crates/quarto-core/src/extension/read.rs` | Create | `_extension.yml` parser |
-| `crates/quarto-core/src/extension/discover.rs` | Create | Extension directory discovery |
-| `crates/quarto-core/src/lib.rs` | Modify | Register `extension` module |
-| `crates/quarto-core/src/format.rs` | Modify | Add `parse_format_descriptor()` |
-| `crates/quarto-core/src/stage/context.rs` | Modify | Add `extensions` field to `StageContext` |
-| `crates/quarto-core/src/stage/stages/metadata_merge.rs` | Modify | Insert extension layer |
-| `crates/quarto/tests/smoke-all/extensions/` | Create | Smoke test fixtures |
+| File | Action | Status | Description |
+|------|--------|--------|-------------|
+| `crates/quarto-core/src/extension/mod.rs` | Create | Done | Module root, public API |
+| `crates/quarto-core/src/extension/types.rs` | Create | Done | Extension, ExtensionId, Contributes structs |
+| `crates/quarto-core/src/extension/read.rs` | Create | Done | `_extension.yml` parser |
+| `crates/quarto-core/src/extension/discover.rs` | Create | Done | Extension directory discovery + FormatDescriptor |
+| `crates/quarto-core/src/lib.rs` | Modify | Done | Register `extension` module |
+| `crates/quarto-core/src/stage/context.rs` | Modify | Done | Add `extensions` field to `StageContext` |
+| `crates/quarto-core/src/stage/stages/metadata_merge.rs` | Modify | Done | Insert extension layer + `build_extension_metadata_layer()` |
+| `crates/quarto-core/src/format.rs` | Modify | TODO | Add `target_format`, `extension_name`, `display_name` to `Format`; add `from_format_string()` |
+| `crates/quarto-core/src/render_to_file.rs` | Modify | TODO | Update `format_from_name()` to use `Format::from_format_string()` |
+| `crates/quarto-test/src/runner.rs` | Modify | TODO | Update format construction if needed |
+| `crates/quarto/tests/smoke-all/extensions/` | Create | TODO | Smoke test fixtures |
 
 ## References
 
 - Master plan: `claude-notes/plans/2026-03-16-extensions-master-plan.md`
-- TS Quarto extension reading: `~/src/quarto-cli/src/extension/extension.ts` (lines 731-938)
-- TS Quarto extension types: `~/src/quarto-cli/src/extension/types.ts`
-- TS Quarto format descriptor: `~/src/quarto-cli/src/command/render/render-contexts.ts`
+- TS Quarto format descriptor: `src/core/pandoc/pandoc-formats.ts` (`parseFormatString()`)
+- TS Quarto format identifier: `src/config/types.ts` (`FormatIdentifier` interface)
+- TS Quarto extension reading: `src/extension/extension.ts`
+- TS Quarto format resolution: `src/command/render/render-contexts.ts` (`readExtensionFormat()`)
 - Current metadata merge: `crates/quarto-core/src/stage/stages/metadata_merge.rs`
 - Current format types: `crates/quarto-core/src/format.rs`
 - Current stage context: `crates/quarto-core/src/stage/context.rs`
