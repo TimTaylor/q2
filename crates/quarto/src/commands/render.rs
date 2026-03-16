@@ -21,8 +21,7 @@ use anyhow::{Context, Result};
 use tracing::info;
 
 use quarto_core::{
-    Format, FormatIdentifier, ProjectContext, QuartoError, RenderToFileOptions,
-    render_document_to_file,
+    Format, ProjectContext, QuartoError, RenderToFileOptions, render_document_to_file,
 };
 use quarto_system_runtime::{NativeRuntime, SystemRuntime};
 
@@ -153,30 +152,13 @@ pub fn execute(args: RenderArgs) -> Result<()> {
 
 /// Resolve format string to Format (without metadata)
 fn resolve_format(format_str: &str) -> Result<Format> {
-    let identifier =
-        FormatIdentifier::try_from(format_str).map_err(|e| anyhow::anyhow!("{}", e))?;
-
-    Ok(Format {
-        identifier,
-        output_extension: match identifier {
-            FormatIdentifier::Html => "html",
-            FormatIdentifier::Pdf => "pdf",
-            FormatIdentifier::Docx => "docx",
-            FormatIdentifier::Epub => "epub",
-            FormatIdentifier::Typst => "pdf",
-            FormatIdentifier::Revealjs => "html",
-            FormatIdentifier::Gfm => "md",
-            FormatIdentifier::CommonMark => "md",
-            FormatIdentifier::Custom(_) => "html",
-        }
-        .to_string(),
-        native_pipeline: identifier.is_native(),
-    })
+    Ok(Format::from_format_string(format_str))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quarto_core::FormatIdentifier;
 
     #[test]
     fn test_resolve_format_html() {
@@ -196,7 +178,8 @@ mod tests {
 
     #[test]
     fn test_resolve_format_unknown() {
-        let result = resolve_format("unknown");
-        assert!(result.is_err());
+        // from_format_string falls back to HTML for unknown formats
+        let format = resolve_format("unknown").unwrap();
+        assert_eq!(format.identifier, FormatIdentifier::Html);
     }
 }

@@ -1,7 +1,7 @@
 # Extensions Phase 1: _extension.yml Parsing and Metadata Contributions
 
 **Created**: 2026-03-16
-**Status**: In Progress (1.1-1.5 complete; 1.4b, 1.6-1.8 remaining)
+**Status**: Complete (1.1-1.5, 1.4b, 1.7-1.8 done; 1.6 deferred)
 **Parent Plan**: `claude-notes/plans/2026-03-16-extensions-master-plan.md`
 
 ## Codebase Context for New Agents
@@ -470,7 +470,7 @@ never finds a matching extension.
 
 **Our approach**: Mirror TS Quarto's `FormatIdentifier` fields on our `Format` struct.
 
-- [ ] **1.4b.1** Add fields to `Format` struct (`format.rs`):
+- [x] **1.4b.1** Add fields to `Format` struct (`format.rs`):
   ```rust
   pub struct Format {
       pub identifier: FormatIdentifier,   // existing: the base format enum
@@ -482,14 +482,14 @@ never finds a matching extension.
   }
   ```
 
-- [ ] **1.4b.2** Update `Format` constructors (`Format::html()`, `Format::pdf()`, etc.)
+- [x] **1.4b.2** Update `Format` constructors (`Format::html()`, `Format::pdf()`, etc.)
   to populate the new fields with sensible defaults:
   ```rust
   Format::html() → target_format: "html", extension_name: None, display_name: "HTML"
   Format::pdf()  → target_format: "pdf",  extension_name: None, display_name: "PDF"
   ```
 
-- [ ] **1.4b.3** Add `Format::from_descriptor()` constructor:
+- [x] **1.4b.3** Add `Format::from_format_string()` constructor:
   ```rust
   /// Create a Format from a format string like "acm-html" or "html".
   /// Uses parse_format_descriptor() to split extension from base format.
@@ -497,20 +497,20 @@ never finds a matching extension.
   ```
   This replaces the private `format_from_name()` in `render_to_file.rs`.
 
-- [ ] **1.4b.4** Update `format_from_name()` in `render_to_file.rs` (lines 310-317)
+- [x] **1.4b.4** Update `format_from_name()` in `render_to_file.rs` (lines 310-317)
   to call `Format::from_format_string()`.
 
-- [ ] **1.4b.5** Update `MetadataMergeStage::run()` to use `ctx.format.target_format`
+- [x] **1.4b.5** Update `MetadataMergeStage::run()` to use `ctx.format.target_format`
   instead of `ctx.format.identifier.as_str()` when calling
   `build_extension_metadata_layer()`. This is the line that currently reads:
   ```rust
   let target_format = ctx.format.identifier.as_str();
   ```
 
-- [ ] **1.4b.6** Update smoke test harness (`quarto-test/src/runner.rs`) if it
+- [x] **1.4b.6** Update smoke test harness (`quarto-test/src/runner.rs`) — no changes needed, it passes format string through to render_to_file which now calls Format::from_format_string
   constructs `Format` directly — it should use the new constructor.
 
-- [ ] **1.4b.7** Write tests:
+- [x] **1.4b.7** Write tests:
   - `Format::from_format_string("html")` → identifier=Html, target_format="html",
     extension_name=None, display_name="HTML"
   - `Format::from_format_string("acm-pdf")` → identifier=Pdf, target_format="acm-pdf",
@@ -629,7 +629,7 @@ The format key under `_quarto.tests` is passed to `render_to_file()`. Each test
 directory needs a `_quarto.yml` for project context (required for extension
 discovery to walk the directory tree).
 
-- [ ] **1.7.1** Create smoke test directory structure:
+- [x] **1.7.1** Create smoke test directory structure:
   ```
   crates/quarto/tests/smoke-all/extensions/
   ├── _quarto.yml                          # needed for project context
@@ -645,7 +645,7 @@ discovery to walk the directory tree).
       └── test.qmd
   ```
 
-- [ ] **1.7.2** `simple-metadata` test:
+- [x] **1.7.2** `simple-metadata` test:
   - `_extension.yml`:
     ```yaml
     title: Test Meta
@@ -674,7 +674,7 @@ discovery to walk the directory tree).
     More content.
     ```
 
-- [ ] **1.7.3** `common-key` test:
+- [x] **1.7.3** `common-key` test:
   - Extension with `common` key contributing to both html and pdf
   - Verify html output includes common + html-specific settings
 
@@ -682,7 +682,7 @@ discovery to walk the directory tree).
 
 - [x] **1.8.1** `cargo build --workspace`
 - [x] **1.8.2** `cargo nextest run --workspace`
-- [ ] **1.8.3** `cargo xtask verify` (extension metadata changes affect quarto-core
+- [x] **1.8.3** `cargo xtask verify` (extension metadata changes affect quarto-core
   which is used by WASM)
 
 ---

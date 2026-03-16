@@ -177,7 +177,12 @@ impl PipelineStage for MetadataMergeStage {
         // 4. Document settings (flattened for format)
         // 5. Runtime metadata (e.g., --metadata flags, WASM preview settings)
         let runtime_meta_json = ctx.runtime.runtime_metadata();
-        let target_format = ctx.format.identifier.as_str();
+        // base_format is the Pandoc format name (e.g., "html") used to flatten
+        // format-specific settings from project/directory/document YAML.
+        let base_format = ctx.format.identifier.as_str();
+        // target_format is the full format string (e.g., "acm-html") used
+        // to look up extension metadata.
+        let target_format = &ctx.format.target_format;
 
         // Layer 1: Project metadata (flattened for format)
         // Adjust !path values to be relative to document directory
@@ -188,32 +193,32 @@ impl PipelineStage for MetadataMergeStage {
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| ctx.project.dir.clone());
         let project_layer = ctx.project.config.metadata.as_ref().map(|m| {
-            let mut flattened = resolve_format_config(m, target_format);
+            let mut flattened = resolve_format_config(m, base_format);
             adjust_paths_to_document_dir(&mut flattened, &ctx.project.dir, &document_dir);
             flattened
         });
 
-        // Layer 2: Extension metadata (flattened for format)
+        // Layer 2: Extension metadata (uses full target_format for lookup)
         let extension_layer = build_extension_metadata_layer(&ctx.extensions, target_format);
 
-        // Layer 3: Directory metadata layers (each flattened for format)
+        // Layer 3: Directory metadata layers (each flattened for base format)
         let dir_layers: Vec<_> = if !ctx.project.is_single_file {
             directory_metadata_for_document(&ctx.project, &ctx.document.input, ctx.runtime.as_ref())
                 .unwrap_or_default()
                 .into_iter()
-                .map(|m| resolve_format_config(&m, target_format))
+                .map(|m| resolve_format_config(&m, base_format))
                 .collect()
         } else {
             vec![]
         };
 
-        // Layer 4: Document metadata (flattened for format)
-        let doc_layer = resolve_format_config(&doc.ast.meta, target_format);
+        // Layer 4: Document metadata (flattened for base format)
+        let doc_layer = resolve_format_config(&doc.ast.meta, base_format);
 
-        // Layer 5: Runtime metadata (flattened for format)
+        // Layer 5: Runtime metadata (flattened for base format)
         let runtime_layer = runtime_meta_json
             .as_ref()
-            .map(|json| resolve_format_config(&json_to_config_value(json), target_format));
+            .map(|json| resolve_format_config(&json_to_config_value(json), base_format));
 
         // Build merge layers: project → extension → dir[0..] → document → runtime
         let mut layers: Vec<&ConfigValue> = Vec::new();
@@ -1237,7 +1242,8 @@ mod tests {
             output_dir: PathBuf::from("/project"),
         };
         let doc = DocumentInfo::from_path("/project/test.qmd");
-        let format = Format::html();
+        // Use from_format_string so target_format is "test-ext-html"
+        let format = Format::from_format_string("test-ext-html");
 
         let mut ctx = StageContext::new(runtime, format, project, doc).unwrap();
 
@@ -1249,21 +1255,30 @@ mod tests {
         );
         ctx.extensions = vec![make_extension("test-ext", formats)];
 
-        // Use "test-ext-html" as format name so the descriptor matches
-        // But our Format is html, and the target_format is "html"...
-        // Actually, the extension layer only activates when format name is "ext-base".
-        // For this test, we need to simulate a format descriptor that references the extension.
-        // Let's test with the build_extension_metadata_layer function directly first.
+        // Now run the full MetadataMergeStage — it should pick up extension metadata
+        let stage = MetadataMergeStage::new();
 
-        // Actually, the issue is that `target_format` comes from `ctx.format.identifier.as_str()`
-        // which returns "html", not "test-ext-html". So the extension layer won't match.
-        // Extensions only apply when the format name includes the extension prefix.
+        let doc_ast = DocumentAst {
+            path: PathBuf::from("/project/test.qmd"),
+            ast: Pandoc::default(),
+            ast_context: pampa::pandoc::ASTContext::default(),
+            source_context: SourceContext::new(),
+            warnings: vec![],
+        };
 
-        // Test the function directly:
-        let layer = build_extension_metadata_layer(&ctx.extensions, "test-ext-html");
-        assert!(layer.is_some());
-        let layer_cv = layer.unwrap();
-        assert_eq!(layer_cv.get("toc").unwrap().as_bool(), Some(true));
+        let input = PipelineData::DocumentAst(doc_ast);
+        let output = stage.run(input, &mut ctx).await.unwrap();
+
+        if let PipelineData::DocumentAst(doc_ast) = output {
+            let toc = doc_ast.ast.meta.get("toc").and_then(|v| v.as_bool());
+            assert_eq!(
+                toc,
+                Some(true),
+                "Extension toc:true should appear in merged metadata"
+            );
+        } else {
+            panic!("Expected DocumentAst output");
+        }
     }
 
     #[tokio::test]

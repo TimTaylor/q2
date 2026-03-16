@@ -260,13 +260,15 @@ fn determine_output_paths(
     format: &str,
     options: &RenderToFileOptions,
 ) -> Result<(PathBuf, PathBuf, String)> {
-    // Determine file extension
-    let extension = match format {
+    // Determine file extension using the base format (strips extension prefix)
+    let render_format = Format::from_format_string(format);
+    let extension = match render_format.identifier.as_str() {
         "html" => "html",
         "pdf" => "pdf",
         "docx" => "docx",
-        "latex" | "tex" => "tex",
         "typst" => "typ",
+        // Note: "latex"/"tex" was previously handled here but FormatIdentifier
+        // has no Latex variant yet. Add one when latex output is supported.
         _ => "html",
     };
 
@@ -308,12 +310,7 @@ fn determine_output_paths(
 
 /// Convert a format name to a Format instance.
 fn format_from_name(name: &str) -> Format {
-    match name {
-        "html" => Format::html(),
-        "pdf" => Format::pdf(),
-        "docx" => Format::docx(),
-        _ => Format::html(),
-    }
+    Format::from_format_string(name)
 }
 
 #[cfg(test)]
