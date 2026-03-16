@@ -386,7 +386,9 @@ pub async fn render_qmd_to_html(
             Box::new(EngineExecutionStage::new()),
             Box::new(MetadataMergeStage::new()),
             Box::new(CompileThemeCssStage::new()),
+            Box::new(UserFiltersStage::pre()),
             Box::new(AstTransformsStage::new()),
+            Box::new(UserFiltersStage::post()),
             Box::new(RenderHtmlBodyStage::new()),
             Box::new(ApplyTemplateStage::with_config(apply_config)),
         ];

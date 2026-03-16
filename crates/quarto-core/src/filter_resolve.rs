@@ -73,10 +73,11 @@ pub fn resolve_filters(meta: &ConfigValue, document_dir: &Path) -> ResolvedFilte
         _ => return ResolvedFilters::default(),
     };
 
-    // Find the sentinel index
+    // Find the sentinel index.
+    // Use as_plain_text() to handle both Scalar(String) and PandocInlines forms.
     let sentinel_index = items
         .iter()
-        .position(|item| item.as_str().map(|s| s == "quarto").unwrap_or(false));
+        .position(|item| item.as_plain_text().map(|s| s == "quarto").unwrap_or(false));
 
     let default_before_idx = entry_point_index(DEFAULT_BEFORE_SENTINEL).unwrap();
     let default_after_idx = entry_point_index(DEFAULT_AFTER_SENTINEL).unwrap();
@@ -126,24 +127,25 @@ pub fn resolve_filters(meta: &ConfigValue, document_dir: &Path) -> ResolvedFilte
 /// Returns the `FilterSpec` and its entry point index.
 fn parse_filter_item(item: &ConfigValue, default_ep_idx: usize) -> (FilterSpec, usize) {
     // String form: "citeproc", "filter.lua", "filter.py"
-    if let Some(s) = item.as_str() {
-        return (FilterSpec::parse(s), default_ep_idx);
+    // Use as_plain_text() to handle both Scalar(String) and PandocInlines forms.
+    if let Some(s) = item.as_plain_text() {
+        return (FilterSpec::parse(&s), default_ep_idx);
     }
 
     // Map form: {type: "lua", path: "filter.lua"} or {path: "filter.lua", at: "pre-ast"}
     if let Some(path_val) = item.get("path") {
-        if let Some(path_str) = path_val.as_str() {
+        if let Some(path_str) = path_val.as_plain_text() {
             // Determine filter type from explicit `type` field or path extension
-            let type_val = item.get("type").and_then(|v| v.as_str());
-            let spec = match type_val {
+            let type_val = item.get("type").and_then(|v| v.as_plain_text());
+            let spec = match type_val.as_deref() {
                 Some("lua") => FilterSpec::Lua(path_str.into()),
                 Some("json") => FilterSpec::Json(path_str.into()),
-                _ => FilterSpec::parse(path_str),
+                _ => FilterSpec::parse(&path_str),
             };
 
             // Check for explicit `at` entry point
-            let ep_idx = if let Some(at_str) = item.get("at").and_then(|v| v.as_str()) {
-                match entry_point_index(at_str) {
+            let ep_idx = if let Some(at_str) = item.get("at").and_then(|v| v.as_plain_text()) {
+                match entry_point_index(&at_str) {
                     Some(idx) => idx,
                     None => {
                         tracing::warn!(

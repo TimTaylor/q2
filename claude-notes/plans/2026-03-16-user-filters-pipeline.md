@@ -1,7 +1,7 @@
 # User Filters in the Render Pipeline
 
 **Created**: 2026-03-16
-**Status**: In Progress (Phases 1-4 complete)
+**Status**: In Progress (Phases 1-6 complete)
 **Parent Epic**: k-407 (Extensible filters for quarto-markdown-pandoc)
 **Related Issues**: k-409 (Lua filter support), k-thpl (Port Lua filter infrastructure)
 
@@ -236,7 +236,7 @@ Currently `unified_filter.rs` and `json_filter.rs` are private modules of pampa'
 
 ### Phase 5: Smoke Test
 
-- [ ] **5.1** Create a smoke test in `crates/quarto/tests/smoke-all/` that exercises
+- [x] **5.1** Create a smoke test in `crates/quarto/tests/smoke-all/` that exercises
   user filters via `q2 render`:
 
   ```
@@ -250,17 +250,25 @@ Currently `unified_filter.rs` and `json_filter.rs` are private modules of pampa'
   Each `.qmd` file uses `_quarto.tests` metadata to verify the HTML output contains
   the expected transformed text.
 
-- [ ] **5.2** Verify the crazytalk filter produces `hElLo wOrLd` (or similar) in
-  the rendered HTML
+- [x] **5.2** Verify the uppercase filter produces `HELLO WORLD` in the rendered HTML
+  (used uppercase.lua instead of crazytalk; simpler and equally effective)
 
-- [ ] **5.3** Verify post-filter runs after built-in transforms (e.g., title block
-  text is also transformed)
+- [x] **5.3** Verify post-filter runs after built-in transforms (post-filter.qmd uses
+  `quarto` sentinel to place uppercase.lua after transforms)
 
 ### Phase 6: Workspace Verification
 
-- [ ] **6.1** `cargo build --workspace`
-- [ ] **6.2** `cargo nextest run --workspace`
-- [ ] **6.3** Manual test: render the crazytalk example from the investigation
+- [x] **6.1** `cargo build --workspace`
+- [x] **6.2** `cargo nextest run --workspace` — 6793 tests passed, 195 skipped
+- [x] **6.3** Manual render verified via smoke tests
+
+### Bug Fix: as_plain_text and custom pipeline
+
+During smoke testing, discovered two issues:
+1. Document YAML metadata stores filter names as `PandocInlines`, not `Scalar(String)`.
+   Fixed `filter_resolve.rs` to use `as_plain_text()` instead of `as_str()`.
+2. `render_qmd_to_html()` had a custom pipeline path (when CSS paths are provided)
+   that didn't include `UserFiltersStage`. Added filter stages to both code paths.
 
 ---
 

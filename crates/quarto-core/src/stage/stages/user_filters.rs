@@ -103,6 +103,7 @@ impl PipelineStage for UserFiltersStage {
             .input
             .parent()
             .unwrap_or(std::path::Path::new("."));
+
         let resolved = resolve_filters(&doc.ast.meta, document_dir);
 
         let filters = self.select_filters(&resolved);
