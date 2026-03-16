@@ -20,11 +20,41 @@
 //! is passed as a template variable, allowing the template to control the
 //! overall document structure while the HTML writer controls content rendering.
 
-use quarto_doctemplate::{Template, TemplateContext, TemplateValue};
+use std::path::Path;
+
+use quarto_doctemplate::{PartialResolver, Template, TemplateContext, TemplateValue};
 use quarto_pandoc_types::{ConfigValue, ConfigValueKind};
+use quarto_system_runtime::SystemRuntime;
 
 use crate::Result;
 use crate::format::{Format, is_minimal_html};
+
+// =============================================================================
+// Runtime Resolver
+// =============================================================================
+
+/// Resolver that loads partials via `SystemRuntime`, enabling WASM VFS access.
+///
+/// Unlike `FileSystemResolver` (which uses `std::fs`), this resolver goes
+/// through the runtime abstraction layer, so it works in both native and
+/// WASM contexts.
+pub struct RuntimeResolver<'a> {
+    runtime: &'a dyn SystemRuntime,
+}
+
+impl<'a> RuntimeResolver<'a> {
+    /// Create a new resolver backed by the given runtime.
+    pub fn new(runtime: &'a dyn SystemRuntime) -> Self {
+        Self { runtime }
+    }
+}
+
+impl PartialResolver for RuntimeResolver<'_> {
+    fn get_partial(&self, name: &str, base_path: &Path) -> Option<String> {
+        let partial_path = quarto_doctemplate::resolve_partial_path(name, base_path);
+        self.runtime.file_read_string(&partial_path).ok()
+    }
+}
 
 // =============================================================================
 // Template Definitions
@@ -1556,5 +1586,63 @@ mod tests {
         assert!(html.contains("My Title"));
         // Should have author meta
         assert!(html.contains("<meta name=\"author\" content=\"Jane Doe\">"));
+    }
+
+    // === RuntimeResolver tests ===
+
+    #[test]
+    fn test_runtime_resolver_loads_partial() {
+        use quarto_doctemplate::PartialResolver;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let template_path = tmp.path().join("template.html");
+        let partial_path = tmp.path().join("header.html");
+
+        std::fs::write(&template_path, "$header()$").unwrap();
+        std::fs::write(&partial_path, "<h1>Header Content</h1>").unwrap();
+
+        let runtime = quarto_system_runtime::NativeRuntime::new();
+        let resolver = RuntimeResolver::new(&runtime);
+
+        let result = resolver.get_partial("header", &template_path);
+        assert_eq!(result, Some("<h1>Header Content</h1>".to_string()));
+    }
+
+    #[test]
+    fn test_runtime_resolver_returns_none_for_missing() {
+        use quarto_doctemplate::PartialResolver;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let template_path = tmp.path().join("template.html");
+        std::fs::write(&template_path, "").unwrap();
+
+        let runtime = quarto_system_runtime::NativeRuntime::new();
+        let resolver = RuntimeResolver::new(&runtime);
+
+        let result = resolver.get_partial("nonexistent", &template_path);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_runtime_resolver_resolves_extension_from_base() {
+        use quarto_doctemplate::PartialResolver;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let template_path = tmp.path().join("template.html");
+        // Partial without extension — should pick up .html from template
+        let partial_path = tmp.path().join("footer.html");
+
+        std::fs::write(&template_path, "").unwrap();
+        std::fs::write(&partial_path, "<footer>The End</footer>").unwrap();
+
+        let runtime = quarto_system_runtime::NativeRuntime::new();
+        let resolver = RuntimeResolver::new(&runtime);
+
+        // Request "footer" (no extension) — should resolve to footer.html
+        let result = resolver.get_partial("footer", &template_path);
+        assert_eq!(result, Some("<footer>The End</footer>".to_string()));
     }
 }
