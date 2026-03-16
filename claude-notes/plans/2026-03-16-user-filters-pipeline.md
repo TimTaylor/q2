@@ -1,7 +1,7 @@
 # User Filters in the Render Pipeline
 
 **Created**: 2026-03-16
-**Status**: In Progress (Phases 1-2 complete)
+**Status**: In Progress (Phases 1-4 complete)
 **Parent Epic**: k-407 (Extensible filters for quarto-markdown-pandoc)
 **Related Issues**: k-409 (Lua filter support), k-thpl (Port Lua filter infrastructure)
 
@@ -167,7 +167,7 @@ Currently `unified_filter.rs` and `json_filter.rs` are private modules of pampa'
 
 ### Phase 3: UserFiltersStage
 
-- [ ] **3.1** Create `crates/quarto-core/src/stage/stages/user_filters.rs` — the
+- [x] **3.1** Create `crates/quarto-core/src/stage/stages/user_filters.rs` — the
   `UserFiltersStage` pipeline stage
 
   ```rust
@@ -199,9 +199,9 @@ Currently `unified_filter.rs` and `json_filter.rs` are private modules of pampa'
   - The target format string comes from `ctx.format.identifier`.
   - `apply_filters` returns `FilterError`; convert to `PipelineError` via `.map_err()`.
 
-- [ ] **3.2** Register the stage in `stage/stages/mod.rs`
+- [x] **3.2** Register the stage in `stage/stages/mod.rs`
 
-- [ ] **3.3** Write tests for `UserFiltersStage`:
+- [x] **3.3** Write tests for `UserFiltersStage`:
   - No filters → passthrough (AST unchanged)
   - Pre stage with Lua filter → filter applied
   - Post stage with Lua filter → filter applied
@@ -211,7 +211,7 @@ Currently `unified_filter.rs` and `json_filter.rs` are private modules of pampa'
 
 ### Phase 4: Pipeline Integration
 
-- [ ] **4.1** Update `build_html_pipeline_stages()` in `pipeline.rs`:
+- [x] **4.1** Update `build_html_pipeline_stages()` in `pipeline.rs`:
 
   ```rust
   pub fn build_html_pipeline_stages() -> Vec<Box<dyn PipelineStage>> {
@@ -229,9 +229,9 @@ Currently `unified_filter.rs` and `json_filter.rs` are private modules of pampa'
   }
   ```
 
-- [ ] **4.2** Update `build_html_pipeline_stages()` docstring with the new stages
+- [x] **4.2** Update `build_html_pipeline_stages()` docstring with the new stages
 
-- [ ] **4.3** Do NOT update `build_wasm_html_pipeline()` — WASM filter support is
+- [x] **4.3** Do NOT update `build_wasm_html_pipeline()` — WASM filter support is
   a separate effort
 
 ### Phase 5: Smoke Test
