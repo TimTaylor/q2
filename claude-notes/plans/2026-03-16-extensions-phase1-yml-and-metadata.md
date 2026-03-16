@@ -10,6 +10,42 @@
 has a "Codebase Context" section with the full crate map, type reference, and
 testing patterns. Read that before starting this work.
 
+### What has already been built (committed to this branch)
+
+All code is in `crates/quarto-core/src/extension/`:
+
+- **`types.rs`** — Data model: `ExtensionId`, `Extension`, `Contributes`, `ExtensionFilter`.
+  An `Extension` represents a parsed `_extension.yml` with all paths resolved to absolute.
+- **`read.rs`** — `read_extension(path, runtime)` parses an `_extension.yml` file.
+  Uses `quarto_yaml::parse_file()` → `yaml_to_config_value()` → extract fields.
+  Merges the "common" format key into all sibling format keys using `MergedConfig`.
+- **`discover.rs`** — `discover_extensions(input, project_dir, runtime)` walks
+  `_extensions/` directories from input up to project root. Also contains
+  `find_extension(name, extensions)` and `parse_format_descriptor(format_str)`.
+- **`mod.rs`** — Re-exports the public API.
+
+Integration points already wired:
+
+- **`stage/context.rs`** — `StageContext` has `pub extensions: Vec<Extension>`,
+  populated in `::new()` via `discover_extensions()`.
+- **`stage/stages/metadata_merge.rs`** — `build_extension_metadata_layer()` looks
+  up extension format metadata by parsing the target format string. Inserts as a
+  layer between Project and Directory in the merge order.
+
+### What is currently broken
+
+The `Format` struct (`format.rs`) only has `identifier: FormatIdentifier` (an enum
+like `Html`, `Pdf`, etc.) and no field for the original format string. When a
+document uses `format: acm-html`:
+
+1. `format_from_name("acm-html")` in `render_to_file.rs` falls back to `Format::html()`
+2. The pipeline sees `ctx.format.identifier.as_str()` → `"html"`
+3. `build_extension_metadata_layer(extensions, "html")` gets no extension match
+4. Extension metadata is never applied
+
+**Phase 1.4b fixes this** by adding `target_format`, `extension_name`, and
+`display_name` fields to `Format`.
+
 ### Quick Reference — Files You'll Touch
 
 | File | What's in it |
