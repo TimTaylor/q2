@@ -1,7 +1,7 @@
 # User Filters in the Render Pipeline
 
 **Created**: 2026-03-16
-**Status**: In Progress (Phase 1 complete)
+**Status**: In Progress (Phases 1-2 complete)
 **Parent Epic**: k-407 (Extensible filters for quarto-markdown-pandoc)
 **Related Issues**: k-409 (Lua filter support), k-thpl (Port Lua filter infrastructure)
 
@@ -114,7 +114,7 @@ Currently `unified_filter.rs` and `json_filter.rs` are private modules of pampa'
 
 ### Phase 2: Filter Resolution from Metadata
 
-- [ ] **2.1** Create `crates/quarto-core/src/filter_resolve.rs` — module for reading
+- [x] **2.1** Create `crates/quarto-core/src/filter_resolve.rs` — module for reading
   and resolving the `filters` metadata key
 
   This module provides a single public function:
@@ -149,7 +149,7 @@ Currently `unified_filter.rs` and `json_filter.rs` are private modules of pampa'
   - Split into Pre/Post groups using the mapping table in "Entry Point Model" above.
   - Resolve relative paths against `document_dir`
 
-- [ ] **2.2** Write tests for `resolve_filters`:
+- [x] **2.2** Write tests for `resolve_filters`:
   - Empty/missing `filters` key → empty result
   - String filters: `["a.lua", "b.py", "citeproc"]` → all Pre (default `pre-quarto`)
   - Object filters: `[{type: "lua", path: "a.lua"}]` → Pre
