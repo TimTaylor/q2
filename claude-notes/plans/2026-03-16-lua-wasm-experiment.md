@@ -266,32 +266,56 @@ The Rust shim implementations live at `crates/wasm-quarto-hub-client/src/c_shim.
 - stdio: `snprintf` (partial — `%d`, `%u`, `%s`, `%c` only), `fprintf`/`fputs`/etc. (panic stubs)
 - time: `clock` (panic stub)
 
-**What Lua additionally needs** — headers AND Rust implementations:
+#### Dependency Strategy
 
-- [ ] `<string.h>` additions: `strlen`, `strchr`, `strcmp`, `strstr`, `strcpy`,
-  `strncpy`, `strcat`, `strncat`, `strspn`, `strcspn`, `strerror`, `strpbrk`
-- [ ] `<stdlib.h>` additions: `strtod`, `strtol`, `strtoul`, `atoi`, `abs`,
-  `rand`, `srand`, `qsort`
-- [ ] `<math.h>` (NEW header): `floor`, `ceil`, `fmod`, `pow`, `fabs`, `sqrt`,
-  `log`, `log2`, `log10`, `exp`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan2`,
-  `frexp`, `ldexp`, `modf`, `HUGE_VAL`, `NAN`, `INFINITY`
-  - Rust impls: wrap `f64::sin()`, `f64::cos()`, etc.
-  - Constants: use clang builtins (`__builtin_huge_val()`, `__builtin_nan("")`, `__builtin_inf()`)
-- [ ] `<ctype.h>` additions: `isdigit`, `isalpha`, `isalnum`, `isspace`,
-  `iscntrl`, `ispunct`, `isupper`, `islower`, `isxdigit`, `toupper`, `tolower`
+Rather than hand-implementing everything, we use three Rust crates:
+
+| Crate | Version | Provides | Notes |
+|-------|---------|----------|-------|
+| **`tinyrlibc`** | 0.5.1 | `strlen`, `strchr`, `strcmp`, `strcpy`, `strstr`, `strcat`, `strncpy`, `strncmp`, `strrchr`, `strspn`, `strcspn`, `memchr`, `qsort`, `rand`/`srand`, `atoi`, `strtol`/`strtoul`, `abs`, `signal`, `isdigit`/`isalpha`/`isspace`/`isupper`, `snprintf` (integers only) | no_std, feature-gated. Source at `~/src/tinyrlibc/`. The `snprintf` is C (handles varargs) but only supports `%d`/`%u`/`%x`/`%s`/`%c` — NO float formats. |
+| **`libm`** | 0.2.16 | All C math functions: `sin`, `cos`, `tan`, `asin`, `acos`, `atan2`, `exp`, `log`, `log2`, `log10`, `sqrt`, `pow`, `fabs`, `floor`, `ceil`, `fmod`, `frexp`, `ldexp`, `modf` | Pure Rust port of musl's math library. Used by Rust's own stdlib on wasm. We expose these as `#[no_mangle] extern "C"` wrappers. (Or use `externc-libm` v0.1.0 which does this automatically.) |
+| **`lexical-core`** | 1.0.6 | Float parsing (`strtod`) and float-to-string (`%g`/`%e`/`%f` for snprintf) | no_std, battle-tested. For `strtod`: wraps `lexical_core::parse_partial::<f64>()` with endptr. For snprintf floats: wraps `lexical_core::write_with_options::<f64>()`. Hex float (`%a`, `0x1.fp10`) needs a small pre-pass since lexical-core doesn't handle C hex float syntax natively. |
+
+**What tinyrlibc does NOT cover** (we still hand-write these):
+
+- Additional ctype: `isalnum`, `iscntrl`, `ispunct`, `islower`, `isxdigit`,
+  `toupper`, `tolower` — trivial one-liners
+- `strerror` — return static "unknown error" string
+- `strpbrk`, `strncat` — simple string ops
+- `localeconv` — stub returning `"."` decimal point
+- `setlocale` — no-op
+- `errno` with `ERANGE`/`EDOM` — static/thread-local int
+- `rust_lua_protected_call` / `rust_lua_throw` — the core catch_unwind mechanism
+
+**What Lua additionally needs** — headers AND implementations:
+
+- [ ] Add `tinyrlibc`, `libm` (or `externc-libm`), and `lexical-core` as
+  dependencies of `wasm-quarto-hub-client` (gated on wasm32 target)
+- [ ] `<string.h>` additions: tinyrlibc provides most (`strlen`, `strchr`,
+  `strcmp`, `strstr`, `strcpy`, `strncpy`, `strcat`, `strspn`, `strcspn`,
+  `strrchr`, `memchr`); hand-write `strpbrk`, `strncat`, `strerror`
+- [ ] `<stdlib.h>` additions: tinyrlibc provides `strtol`, `strtoul`, `atoi`,
+  `abs`, `qsort`, `rand`, `srand`; wrap `lexical-core` for `strtod`
+- [ ] `<math.h>` (NEW header): use `libm` crate for all functions; expose as
+  `#[no_mangle] extern "C"` wrappers. Constants via clang builtins
+  (`__builtin_huge_val()`, `__builtin_nan("")`, `__builtin_inf()`)
+- [ ] `<ctype.h>` additions: tinyrlibc provides `isdigit`, `isalpha`, `isspace`,
+  `isupper`; hand-write `isalnum`, `iscntrl`, `ispunct`, `islower`, `isxdigit`,
+  `toupper`, `tolower`
 - [ ] `<locale.h>` (NEW header): `localeconv` (stub — return static struct with
   `"."` as decimal point), `setlocale` (no-op)
-- [ ] `<signal.h>` (NEW header): `signal` (no-op, return SIG_DFL)
-- [ ] `<errno.h>` (NEW header): thread-local `errno`, `ERANGE`, `EDOM`
+- [ ] `<signal.h>` (NEW header): tinyrlibc provides `signal`
+- [ ] `<errno.h>` (NEW header): static `errno`, `ERANGE`, `EDOM`
 - [ ] `<float.h>` (NEW header): `FLT_RADIX`, `DBL_MAX`, `DBL_MAX_10_EXP`,
   `LDBL_MAX_10_EXP`, etc.
 - [ ] `<limits.h>` (NEW header): `INT_MAX`, `INT_MIN`, `LONG_MAX`, `ULONG_MAX`,
   `LLONG_MAX`, `CHAR_BIT`, etc.
 - [ ] `<stdarg.h>`: Should be provided by clang builtins automatically (verify)
 - [ ] `rust_lua_protected_call` and `rust_lua_throw` in c_shim.rs (the core mechanism)
-- [ ] Extend `snprintf` to handle `%g`, `%e`, `%f`, `%a`, `%x`, `%p` format
-  specifiers — Lua uses these for number formatting. Implement by delegating to
-  Rust's `format!` machinery for floats.
+- [ ] Replace existing hand-written `snprintf` with tinyrlibc's C implementation
+  (which handles varargs properly) and extend it with float format support using
+  `lexical-core` for `%g`, `%e`, `%f` specifiers. `%a` (hex float) can be
+  stubbed initially — it's rarely used by Lua filters.
 
 ### Phase 3: Wire mlua into the WASM build
 
@@ -396,16 +420,19 @@ loadlib.c (package): `dlopen`, `dlsym`, `dlclose`, `dlerror`
 
 ## Math Functions Strategy
 
-Rust's `f64` type provides all the math operations Lua needs. Implement C math
-shims as thin wrappers:
+Use the **`libm`** crate (v0.2.16), a pure Rust port of musl's math library.
+It's what Rust's own standard library uses on wasm targets. Expose functions as
+`#[no_mangle] extern "C"` wrappers in c_shim.rs:
 
 ```rust
-#[no_mangle] pub extern "C" fn sin(x: f64) -> f64 { x.sin() }
-#[no_mangle] pub extern "C" fn cos(x: f64) -> f64 { x.cos() }
-#[no_mangle] pub extern "C" fn floor(x: f64) -> f64 { x.floor() }
-#[no_mangle] pub extern "C" fn pow(base: f64, exp: f64) -> f64 { base.powf(exp) }
+#[no_mangle] pub extern "C" fn sin(x: f64) -> f64 { libm::sin(x) }
+#[no_mangle] pub extern "C" fn cos(x: f64) -> f64 { libm::cos(x) }
+#[no_mangle] pub extern "C" fn floor(x: f64) -> f64 { libm::floor(x) }
+#[no_mangle] pub extern "C" fn pow(base: f64, exp: f64) -> f64 { libm::pow(base, exp) }
 // etc.
 ```
+
+Alternative: use **`externc-libm`** (v0.1.0) which does this wrapping automatically.
 
 For header constants, use clang builtins:
 ```c
@@ -416,21 +443,75 @@ For header constants, use clang builtins:
 
 ---
 
-## snprintf: The Hidden Boss
+## strtod Strategy
 
-Lua uses `snprintf` extensively for number formatting (`%g`, `%.14g`, `%a`,
-`%e`, `%f`, `%p`, `%x`). Our current snprintf handles `%d`, `%u`, `%s`, `%c`
-but NOT floating-point formats.
+Use **`lexical-core`** (v1.0.6) for float parsing. It's no_std compatible,
+battle-tested, and handles decimal floats, infinity, and NaN. Wrap as:
 
-**Recommended approach**: Extend the existing `snprintf` in c_shim.rs to handle
-float format specifiers by delegating to Rust's `format!` machinery:
-- `%f` → `format!("{:.precision$}", val)` (or default 6 digits)
-- `%e` → `format!("{:.precision$e}", val)`
-- `%g` → choose between `%f` and `%e` based on magnitude (Lua's default format)
-- `%a` → hex float format (less common, can stub initially)
+```rust
+#[no_mangle]
+pub unsafe extern "C" fn strtod(s: *const c_char, endptr: *mut *mut c_char) -> f64 {
+    let bytes = /* slice from s to first NUL or reasonable bound */;
+    // Skip leading whitespace
+    let trimmed = bytes.trim_ascii_start();
+    let offset = bytes.len() - trimmed.len();
 
-This is significant work but bounded. Alternative: find a Rust `snprintf` crate
-or port musl's printf implementation.
+    // Pre-pass: check for C hex float syntax (0x...) that lexical-core
+    // doesn't handle natively. Convert to decimal if needed, or handle
+    // with a small custom parser.
+
+    match lexical_core::parse_partial::<f64>(trimmed) {
+        Ok((value, consumed)) => {
+            if !endptr.is_null() {
+                *endptr = s.add(offset + consumed) as *mut c_char;
+            }
+            value
+        }
+        Err(_) => {
+            if !endptr.is_null() {
+                *endptr = s as *mut c_char;
+            }
+            0.0
+        }
+    }
+}
+```
+
+Hex float (`0x1.fp10`) needs a small pre-pass since lexical-core doesn't parse
+C hex float syntax natively. This format is used by Lua's `%a` formatter and
+`tonumber("0x1.8p1")`. Can be deferred for the initial demo if needed.
+
+---
+
+## snprintf Strategy
+
+Use **tinyrlibc's snprintf.c** as the base — it's a proper C implementation
+that handles varargs (which Rust can't do). It already supports `%d`, `%u`,
+`%x`, `%s`, `%c` with width/precision/padding.
+
+For float formats (`%g`, `%e`, `%f`) needed by Lua, extend tinyrlibc's
+`vsnprintf` to call into Rust helpers that use **`lexical-core`** for
+float-to-string conversion:
+
+```c
+// In the vsnprintf switch statement, add:
+case 'g': case 'G':
+case 'e': case 'E':
+case 'f': case 'F': {
+    double val = va_arg(ap, double);
+    // Call into Rust for float formatting
+    char float_buf[64];
+    int float_len = rust_format_float(val, *fmt, precision, float_buf, sizeof(float_buf));
+    // Write float_buf to output with padding
+    ...
+}
+```
+
+The `rust_format_float` Rust function uses `lexical_core::write_with_options`
+to format the float according to the specifier. This avoids reimplementing
+printf float formatting from scratch.
+
+`%a` (hex float output) can be stubbed initially — it's rarely used.
 
 ---
 
@@ -440,7 +521,9 @@ or port musl's printf implementation.
 |------|-----------|
 | `wasm-pack` doesn't support `-Zbuild-std` | Use manual `cargo build` + `wasm-bindgen` CLI instead |
 | Nested pcall interactions with `catch_unwind` | Already tested with nested C frames — works |
-| Lua number formatting needs full `snprintf` | Extend c_shim.rs snprintf with float support |
+| Lua number formatting needs full `snprintf` | Use tinyrlibc's snprintf.c + extend with `lexical-core` for float formats |
+| `lexical-core` hex float gaps | `strtod` needs a small pre-pass for `0x` hex floats; `%a` output can be stubbed initially |
+| tinyrlibc symbol conflicts with existing c_shim.rs | Both export `strlen`, `malloc`, etc. — disable overlapping tinyrlibc features, keep our existing impls |
 | `localeconv` decimal point detection | Stub to always return `"."` — correct for WASM |
 | Math precision differences | Rust f64 = C double = IEEE 754 — should match |
 | Browser WASM EH support | Chrome 95+, Firefox 100+, Safari 15.2+ — all modern |
