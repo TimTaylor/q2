@@ -3,7 +3,7 @@
 **Date**: 2026-03-16
 **Branch**: `experiment/lua-wasm`
 **Worktree**: `~/src/q2-lua-wasm-spike` (git worktree of `~/src/q2`)
-**Status**: BLOCKED — panic unwind not working in WASM runtime (see Current Blocker below)
+**Status**: Phase 3 COMPLETE — Lua runs in WASM! All 8 tests pass.
 **Context**: [Investigation](../investigations/2026-03-16-lua-wasm-options.md) — Option 8
 
 ## Goal
@@ -24,7 +24,7 @@ no libc). The experiment adds Lua scripting support to the WASM build.
 
 - `crates/wasm-quarto-hub-client/` — The WASM crate (excluded from workspace, has own Cargo.toml)
   - `src/c_shim.rs` — Rust implementations of C libc functions for WASM (malloc, strlen, etc.)
-  - `src/lib.rs` — WASM entry points, includes `test_lua()` function
+  - `src/lib.rs` — WASM entry points, includes `test_lua()` and `test_unwind()` functions
   - `wasm-sysroot/` — Stub C headers for compilation
   - `.cargo/config.toml` — Build flags including `-Zbuild-std` and `+exception-handling`
   - `Cargo.toml` — Has `[patch.crates-io]` for lua-src and wasm-bindgen-futures
@@ -35,24 +35,25 @@ no libc). The experiment adds Lua scripting support to the WASM build.
 - `crates/wasm-bindgen-futures-patch/` — Patched wasm-bindgen-futures 0.4.58
   - Removes `UnwindSafe` bound from `future_to_promise` (needed for panic=unwind compat)
 - `crates/pampa/src/lib.rs` — Has `lua_wasm_test()` function that creates Lua VM and evals script
+- `test-unwind/` — Minimal standalone test proving catch_unwind works on wasm32
 
 ### How to build
 
 ```bash
 cd crates/wasm-quarto-hub-client
 
-# Method 1: wasm-pack (does NOT support -Zbuild-std, so no panic unwind)
-CFLAGS_wasm32_unknown_unknown="-I$(pwd)/wasm-sysroot -fno-builtin -DHAVE_ENDIAN_H -fwasm-exceptions" \
-CC_wasm32_unknown_unknown=/opt/homebrew/opt/llvm/bin/clang \
-PATH="/opt/homebrew/opt/llvm/bin:$PATH" \
-wasm-pack build --target web
-
-# Method 2: cargo build + wasm-bindgen (supports -Zbuild-std via .cargo/config.toml)
-CFLAGS_wasm32_unknown_unknown="-I$(pwd)/wasm-sysroot -fno-builtin -DHAVE_ENDIAN_H -fwasm-exceptions" \
-CC_wasm32_unknown_unknown=/opt/homebrew/opt/llvm/bin/clang \
+# Build WASM (requires nightly Rust with rust-src component)
+CC_wasm32_unknown_unknown="/opt/homebrew/opt/llvm/bin/clang" \
+CFLAGS_wasm32_unknown_unknown="-isystem $(pwd)/wasm-sysroot" \
 cargo build --target wasm32-unknown-unknown --release
-# Then: wasm-bindgen --target web --out-dir pkg target/wasm32-unknown-unknown/release/wasm_quarto_hub_client.wasm
+
+# Generate JS glue (web target for ESM compatibility)
+wasm-bindgen --target web --out-dir pkg target/wasm32-unknown-unknown/release/wasm_quarto_hub_client.wasm
 ```
+
+**Important**: Must use Homebrew LLVM clang (not Apple clang) because Apple clang
+doesn't support the `wasm32-unknown-unknown` target. The `-isystem` flag provides
+our stub sysroot headers to all C compilation (tree-sitter, lua-src, etc.).
 
 ### How to test
 
@@ -62,50 +63,9 @@ node test-lua-wasm.mjs
 ```
 
 The test script patches out hub-client JS bridge imports and runs Lua scripts through WASM.
-
----
-
-## Current Blocker: WASM panic unwind
-
-**The WASM binary compiles, links, and instantiates — but Lua calls hit `unreachable` traps.**
-
-The core problem: Lua's error handling uses `panic!()` (via `rust_lua_throw`) which needs
-to unwind through C frames. On wasm32, panics default to abort. We need:
-
-1. **`-Cpanic=unwind`** — Tell rustc to emit unwind info instead of abort
-2. **`-Ctarget-feature=+exception-handling`** — Enable WASM exception handling instructions
-3. **`-Zbuild-std=std,panic_unwind`** — Rebuild std with unwind support for wasm32
-4. **`-fwasm-exceptions`** on C code — Already set via CFLAGS
-
-The `.cargo/config.toml` has flags #1, #2, #3 configured. The `cargo build` method
-compiles successfully. But at runtime, Lua operations still hit `unreachable` traps.
-
-**Diagnosis needed**: The panic unwind may not actually be working despite the flags.
-Possible causes:
-- The WASM exception handling feature might not be supported by the Node.js version
-  being used (need `--experimental-wasm-eh` or Node 20+)
-- The `-Zbuild-std` might not be properly rebuilding `panic_unwind` (check if
-  `catch_unwind` actually catches panics vs aborts)
-- The C code might need additional flags beyond `-fwasm-exceptions`
-- `wasm-opt` (run by wasm-pack) might strip exception handling sections
-
-**Recommended next steps**:
-1. Build a MINIMAL test (no hub-client, just a tiny WASM module that does
-   `catch_unwind(|| panic!("test"))`) to verify the toolchain works
-2. Check Node.js version supports WASM EH: `node --print 'process.version'`
-3. Compare with the working test at `/tmp/wasm-unwind-test/` (from the investigation)
-4. Once the minimal test works, apply the same build flags to the full crate
-
-**Important**: The previous investigation at `/tmp/wasm-unwind-test/` DID get
-`catch_unwind` working through C frames in WASM. That test used:
-- nightly Rust with `-Zbuild-std=std,panic_unwind`
-- `-Cpanic=unwind -Ctarget-feature=+exception-handling` as RUSTFLAGS
-- `-fwasm-exceptions` for C compilation
-- `extern "C-unwind"` for all FFI functions
-- Node.js to run the WASM
-
-The key difference between that test and our current build might be how wasm-pack
-or the cdylib linking interacts with build-std, or the wasm-opt post-processing.
+Expected output: 8 passed, 0 failed. The `panicked at src/c_shim.rs:452:5: lua error`
+messages on stderr are EXPECTED — that's Lua's error handling mechanism (throw via panic,
+caught by `catch_unwind` in `rust_lua_protected_call`).
 
 ---
 
@@ -191,29 +151,6 @@ with corresponding header stubs in `wasm-sysroot/`.
 
 ---
 
-## Proven So Far (from prior investigation)
-
-We built and ran a test at `/tmp/wasm-unwind-test/` that proved:
-
-1. **`catch_unwind` works on `wasm32-unknown-unknown`** with nightly Rust +
-   `-Zbuild-std=std,panic_unwind` + `-Cpanic=unwind` + `-Ctarget-feature=+exception-handling`
-2. **Panics unwind correctly through C frames** when:
-   - Rust functions use `extern "C-unwind"` (not `extern "C"` — that aborts!)
-   - C code is compiled with `-fwasm-exceptions`
-3. **mlua-sys already uses `extern "C-unwind"`** for all 20 Lua API declarations in lua54
-4. **All 5 progressive tests passed** in Node.js:
-   - No error (baseline)
-   - Pure Rust catch_unwind → panic (caught)
-   - Rust → Rust catch_unwind → Rust callback → panic (caught)
-   - Rust → C frame → Rust catch_unwind → Rust callback → panic (caught)
-   - Rust → C frame → Rust catch_unwind → C frame → Rust callback → panic (caught)
-
-The test code is at `/tmp/wasm-unwind-test/` if it still exists. The key finding
-was that `extern "C"` (without `-unwind`) causes panics to abort at FFI boundaries.
-Switching to `extern "C-unwind"` fixed everything.
-
----
-
 ## Architecture
 
 ```
@@ -294,7 +231,7 @@ pub extern "C-unwind" fn rust_lua_throw() -> ! {
 | `-Ctarget-feature=+exception-handling` | In .cargo/config.toml | Enables WASM EH instructions |
 | Homebrew LLVM | Installed at `/opt/homebrew/opt/llvm/bin/clang` | Supports wasm32 target |
 | `CC_wasm32_unknown_unknown` | Set at build time | Point to homebrew clang |
-| `-fwasm-exceptions` | Set in CFLAGS | C code needs WASM EH support for unwind-through |
+| `CFLAGS_wasm32_unknown_unknown` | `-isystem $(pwd)/wasm-sysroot` | Provides C headers for all C deps |
 
 ---
 
@@ -326,38 +263,39 @@ Functions added to c_shim.rs:
 - [x] Math: `frexp`
 - [x] Locale: `localeconv` (stub returning `"."`)
 - [x] Errno: `__errno_location` (static int)
-- [x] Time: `time` (stub returning 42)
+- [x] Time: `time` (returns 42, `i32` — matches wasm32 `long`), `clock` (returns 0, `u32`)
 - [x] Stdio: `fopen`, `freopen`, `fgets`, `fread`, `fflush`, `ferror`, `feof`, `getc` (stubs)
 
 Verification: `env` imports in WASM binary went from 39 → 0.
 
-**NOT yet done** (may be needed later for full Lua functionality):
-- [ ] Math functions beyond `frexp` (sin, cos, pow, etc.) — not needed until math.* is used
-- [ ] `snprintf` float formats (%g, %e, %f) — not needed until string.format with floats
-- [ ] `strtol`, `strtoul`, `qsort`, `rand`, `srand` — not needed until those Lua paths are hit
-
-### Phase 3: Wire mlua into the WASM build — PARTIALLY DONE
+### Phase 3: Wire mlua into the WASM build ✅
 
 - [x] Enable `lua-filter` feature in `wasm-quarto-hub-client/Cargo.toml`
 - [x] Add `lua_wasm_test()` function in `pampa/src/lib.rs` — creates Lua VM with safe libs
   - Uses `Lua::new_with()` with COROUTINE|TABLE|STRING|UTF8|MATH (no DEBUG — mlua rejects it)
-- [x] Add `test_lua()` wasm-bindgen function in `wasm-quarto-hub-client/src/lib.rs`
+- [x] Add `test_lua()` and `test_unwind()` wasm-bindgen functions in `wasm-quarto-hub-client/src/lib.rs`
 - [x] WASM binary builds and links with zero unresolved symbols
 - [x] WASM binary instantiates in Node.js
 - [x] Patch `wasm-bindgen-futures` to remove `UnwindSafe` bound (in `crates/wasm-bindgen-futures-patch/`)
 - [x] `.cargo/config.toml` configured with `build-std`, `panic=unwind`, `+exception-handling`
 - [x] `cargo build --target wasm32-unknown-unknown --release` succeeds with build-std
+- [x] Fix `time()` return type: was `i64`, must be `i32` (wasm32 `long` is 32-bit) — caused `signature_mismatch:time` trap
+- [x] Fix `clock()` return type: was `u64`, must be `u32` (same reason)
+- [x] Use `--target web` for wasm-bindgen (ESM-compatible JS glue)
+- [x] Update test-lua-wasm.mjs to handle both `import` and `require()` patterns
+- [x] **ALL 8 TESTS PASS**: simple string, integer math, float math, string ops, string.format, table sort, pcall error, coroutine
 
-**BLOCKED**: Runtime `unreachable` trap when calling `test_lua()`. See "Current Blocker" above.
-
-- [ ] Fix panic unwind to actually work at runtime
-- [ ] Update `hub-client/scripts/build-wasm.js` to use the correct build flags
+**Root cause of the previous runtime trap**: The `time()` function in c_shim.rs
+returned `i64` but C's `time_t` is `long` which is 32-bit on wasm32. WASM enforces
+strict type signature matching at the function call boundary, so the 64-bit vs 32-bit
+mismatch triggered an `unreachable` (signature_mismatch) trap during `lua_newstate`.
 
 ### Phase 4: Enable UserFiltersStage in WASM pipeline
 
 - [ ] In `quarto-core/src/pipeline.rs`, add `UserFiltersStage` to the WASM pipeline
 - [ ] Wire up VFS-based filter file reading
 - [ ] Test with a simple filter
+- [ ] Update `hub-client/scripts/build-wasm.js` to use the correct build flags
 
 ### Phase 5: End-to-end demo
 
@@ -386,10 +324,11 @@ because `linit.c` references them even when they aren't loaded.
 |------|--------|-------|
 | `wasm-pack` doesn't support `-Zbuild-std` | CONFIRMED | Use manual `cargo build` + `wasm-bindgen` CLI instead |
 | `wasm-bindgen-futures` UnwindSafe bound | FIXED | Patched in `crates/wasm-bindgen-futures-patch/` |
-| Nested pcall interactions with `catch_unwind` | Untested in full build | Worked in isolation test |
-| `unreachable` trap at runtime | **CURRENT BLOCKER** | Build flags may not be propagating correctly |
+| Nested pcall interactions with `catch_unwind` | WORKS | pcall error test passes |
+| `unreachable` trap at runtime | **FIXED** | Was `time()` signature mismatch (i64 vs i32) |
 | Browser WASM EH support | Unknown | Chrome 95+, Firefox 100+, Safari 15.2+ should work |
 | `extern "C"` vs `extern "C-unwind"` confusion | Addressed | mlua uses C-unwind; our shims must too |
+| Apple clang can't target wasm32 | CONFIRMED | Must use Homebrew LLVM clang via CC env var |
 
 ---
 
@@ -406,3 +345,18 @@ because `linit.c` references them even when they aren't loaded.
 
 4. **Keep wasm-pack for non-unwind builds** — it still works for compilation
    verification and produces smaller binaries (with wasm-opt).
+
+5. **Use `--target web`** for wasm-bindgen instead of `--target nodejs`, because
+   the test harness uses ESM (`import()`) and nodejs target generates CommonJS.
+
+## Lessons Learned
+
+1. **WASM type signature matching is strict**: If a C function expects `long` (32-bit
+   on wasm32) but Rust returns `i64`, WASM traps with `signature_mismatch` at runtime.
+   Always match C types exactly: `long` → `i32`/`c_long`, `unsigned long` → `u32`/`c_ulong`.
+
+2. **Apple clang doesn't support wasm32-unknown-unknown**: Must use Homebrew LLVM
+   clang. Set `CC_wasm32_unknown_unknown=/opt/homebrew/opt/llvm/bin/clang`.
+
+3. **Global CFLAGS needed for all C deps**: Not just lua-src but tree-sitter etc.
+   also need the sysroot headers. Use `CFLAGS_wasm32_unknown_unknown="-isystem ..."`.

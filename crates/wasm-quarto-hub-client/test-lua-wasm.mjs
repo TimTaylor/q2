@@ -15,9 +15,10 @@ const pkgDir = join(__dirname, 'pkg');
 // Read the generated JS
 let jsSource = await readFile(join(pkgDir, 'wasm_quarto_hub_client.js'), 'utf-8');
 
-// Remove ALL import lines that reference /src/wasm-js-bridge/
+// Remove ALL import/require lines that reference /src/wasm-js-bridge/
 jsSource = jsSource.replace(/^import .+ from ['"]\/src\/wasm-js-bridge\/[^'"]+['"];?\s*$/gm, '');
 jsSource = jsSource.replace(/^import \* as \w+ from ['"]\/src\/wasm-js-bridge\/[^'"]+['"];?\s*$/gm, '');
+jsSource = jsSource.replace(/^const .+ = require\(.*\/src\/wasm-js-bridge\/[^)]+\);?\s*$/gm, '');
 
 // Add stubs at the top of the file
 const stubs = `
@@ -33,9 +34,10 @@ function jsRenderSimpleTemplate() { return ''; }
 function jsTemplateAvailable() { return false; }
 function jsSassAvailable() { return false; }
 
-// These are the module-level imports that wasm-bindgen references
+// These are the module-level require() results that wasm-bindgen references
 const import1 = { jsRenderEjs, jsRenderSimpleTemplate, jsTemplateAvailable };
 const import2 = { jsCompileSass, jsSassAvailable };
+
 `;
 jsSource = stubs + jsSource;
 
@@ -46,11 +48,29 @@ await writeFile(tmpFile, jsSource);
 try {
   const mod = await import(tmpFile);
 
-  // Initialize
+  // Initialize — web target needs a WebAssembly.Module, not raw bytes
   const wasmBytes = await readFile(join(pkgDir, 'wasm_quarto_hub_client_bg.wasm'));
-  await mod.default(wasmBytes);
+  const wasmModule = await WebAssembly.compile(wasmBytes);
+  await mod.default(wasmModule);
 
   console.log('WASM module initialized with Lua!\n');
+
+  // Test 0: basic unwind (no Lua)
+  console.log('Test 0: Basic catch_unwind (no Lua)');
+  try {
+    const r0 = mod.test_unwind();
+    console.log(`  Result: ${r0}`);
+    console.log(`  ${r0.includes('caught panic') ? 'PASS' : 'FAIL'}`);
+  } catch (e) {
+    console.log(`  TRAP: ${e.message}`);
+    console.log('  The unwind mechanism itself is broken in this binary.');
+    process.exit(1);
+  }
+
+  // Capture console.error output
+  const origError = console.error;
+  let lastError = '';
+  console.error = (...args) => { lastError = args.join(' '); origError.apply(console, args); };
 
   const tests = [
     ['Simple string', 'return "Hello from Lua in WASM!"', 'Hello from Lua in WASM!'],
@@ -98,12 +118,32 @@ try {
         passed++;
       }
     } catch (e) {
-      console.log(`ERROR: ${e.message}`);
+      console.log(`  ERROR: ${e.message}`);
+      console.log(`  Stack: ${e.stack?.split('\n').slice(0,5).join('\n  ')}`);
       failed++;
     }
   }
 
-  console.log(`\n${passed} passed, ${failed} failed out of ${tests.length} tests`);
+  // Smoke test: verify tree-sitter / QMD parsing still works
+  console.log('\nSmoke test: parse_qmd_content (tree-sitter)');
+  try {
+    const qmd = '# Hello\n\nWorld\n';
+    const result = mod.parse_qmd_content(qmd);
+    const parsed = JSON.parse(result);
+    if (parsed.success) {
+      console.log('  PASS — QMD parsing works');
+      passed++;
+    } else {
+      console.log(`  FAIL — parse returned success=false: ${result.slice(0, 200)}`);
+      failed++;
+    }
+  } catch (e) {
+    console.log(`  ERROR: ${e.message}`);
+    console.log(`  Stack: ${e.stack?.split('\n').slice(0,5).join('\n  ')}`);
+    failed++;
+  }
+
+  console.log(`\n${passed} passed, ${failed} failed out of ${tests.length + 1} tests`);
   process.exit(failed > 0 ? 1 : 0);
 } finally {
   await unlink(tmpFile).catch(() => {});

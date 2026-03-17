@@ -185,8 +185,9 @@ pub unsafe extern "C" fn towlower(c: c_int) -> c_int {
 /* --------------------------------- time.h --------------------------------- */
 
 #[no_mangle]
-pub unsafe extern "C" fn clock() -> u64 {
-    panic!("clock is not supported");
+pub unsafe extern "C" fn clock() -> u32 {
+    // clock_t is unsigned long, which is 32-bit on wasm32
+    0
 }
 
 /* --------------------------------- ctype.h -------------------------------- */
@@ -916,9 +917,9 @@ pub unsafe extern "C" fn __errno_location() -> *mut c_int {
 /* ====================================================================== */
 
 #[no_mangle]
-pub unsafe extern "C" fn time(_t: *mut c_void) -> i64 {
-    // Return a pseudo-timestamp. In WASM we don't have real time,
-    // but this is only used for default random seed.
+pub unsafe extern "C" fn time(_t: *mut c_void) -> i32 {
+    // time_t is long, which is 32-bit on wasm32.
+    // Return a pseudo-timestamp — only used for default random seed.
     42
 }
 
