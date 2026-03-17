@@ -72,6 +72,13 @@ pub fn init() {
     console_error_panic_hook::set_once();
 }
 
+/// Test function: create a Lua VM and run a simple script.
+/// Returns the result string or an error message.
+#[wasm_bindgen]
+pub fn test_lua(script: &str) -> String {
+    pampa::lua_wasm_test(script)
+}
+
 // ============================================================================
 // RESPONSE TYPES
 // ============================================================================

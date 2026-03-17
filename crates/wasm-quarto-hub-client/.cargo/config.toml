@@ -1,2 +1,5 @@
 [target.wasm32-unknown-unknown]
-rustflags = ["-C", "target-feature=+bulk-memory", "-Zwasm-c-abi=spec"]
+rustflags = ["-C", "target-feature=+bulk-memory,+exception-handling", "-C", "panic=unwind", "-Zwasm-c-abi=spec"]
+
+[unstable]
+build-std = ["std", "panic_unwind"]
