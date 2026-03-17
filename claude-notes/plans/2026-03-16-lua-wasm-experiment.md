@@ -296,7 +296,7 @@ mismatch triggered an `unreachable` (signature_mismatch) trap during `lua_newsta
 - [x] Wire up VFS-based filter file reading (threaded `Arc<dyn SystemRuntime>` through entire call chain)
 - [x] Use `Lua::new_with()` on WASM to avoid `Lua::new()` trying to disable C modules (our `luaopen_package` stub is empty)
 - [x] Test with a simple filter — end-to-end `upper.lua` filter uppercases content in rendered HTML
-- [ ] Update `hub-client/scripts/build-wasm.js` to use the correct build flags
+- [x] Update `hub-client/scripts/build-wasm.js` to use cargo build + wasm-bindgen CLI
 
 Changes made:
 - `apply_lua_filter()`, `apply_lua_filters()` in `pampa/src/lua/filter.rs` — accept `Arc<dyn SystemRuntime>`, use `runtime.file_read()` instead of `std::fs::read_to_string()`
