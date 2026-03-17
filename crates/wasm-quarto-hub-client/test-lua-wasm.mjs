@@ -143,7 +143,62 @@ try {
     failed++;
   }
 
-  console.log(`\n${passed} passed, ${failed} failed out of ${tests.length + 1} tests`);
+  // End-to-end test: Lua filter through the full render pipeline
+  console.log('\nEnd-to-end: Lua filter via render_qmd pipeline');
+  try {
+    // Clear VFS and set up project
+    mod.vfs_clear();
+
+    // Add _quarto.yml project file
+    mod.vfs_add_file('/project/_quarto.yml', 'project:\n  type: default\n');
+
+    // Add a Lua filter that uppercases all Str elements
+    const luaFilter = `
+function Str(el)
+  return pandoc.Str(el.text:upper())
+end
+`;
+    mod.vfs_add_file('/project/upper.lua', luaFilter);
+
+    // Add a QMD file that references the filter
+    const qmd = `---
+title: Filter Test
+filters:
+  - upper.lua
+---
+
+Hello world
+`;
+    mod.vfs_add_file('/project/test.qmd', qmd);
+
+    // Render through the full pipeline
+    const result = await mod.render_qmd('/project/test.qmd');
+    const rendered = JSON.parse(result);
+
+    if (rendered.success && rendered.html && rendered.html.includes('HELLO WORLD')) {
+      console.log('  PASS — Lua filter uppercased content in rendered HTML');
+      passed++;
+    } else if (rendered.success && rendered.html) {
+      // Filter might not have run — check what we got
+      if (rendered.html.includes('Hello world')) {
+        console.log('  FAIL — Filter did not run (content unchanged)');
+        console.log(`  HTML snippet: ${rendered.html.slice(0, 500)}`);
+      } else {
+        console.log(`  FAIL — unexpected content: ${rendered.html.slice(0, 300)}`);
+      }
+      failed++;
+    } else {
+      console.log(`  FAIL — render failed: ${rendered.error || 'unknown'}`);
+      failed++;
+    }
+  } catch (e) {
+    console.log(`  ERROR: ${e.message}`);
+    console.log(`  Stack: ${e.stack?.split('\n').slice(0,5).join('\n  ')}`);
+    failed++;
+  }
+
+  const total = tests.length + 2; // +1 smoke, +1 e2e
+  console.log(`\n${passed} passed, ${failed} failed out of ${total} tests`);
   process.exit(failed > 0 ? 1 : 0);
 } finally {
   await unlink(tmpFile).catch(() => {});

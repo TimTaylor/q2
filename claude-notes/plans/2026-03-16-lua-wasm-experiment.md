@@ -3,7 +3,7 @@
 **Date**: 2026-03-16
 **Branch**: `experiment/lua-wasm`
 **Worktree**: `~/src/q2-lua-wasm-spike` (git worktree of `~/src/q2`)
-**Status**: Phase 3 COMPLETE — Lua runs in WASM! All 8 tests pass.
+**Status**: Phase 4 COMPLETE — End-to-end Lua filter works through full render pipeline! 10/10 tests pass.
 **Context**: [Investigation](../investigations/2026-03-16-lua-wasm-options.md) — Option 8
 
 ## Goal
@@ -290,16 +290,24 @@ returned `i64` but C's `time_t` is `long` which is 32-bit on wasm32. WASM enforc
 strict type signature matching at the function call boundary, so the 64-bit vs 32-bit
 mismatch triggered an `unreachable` (signature_mismatch) trap during `lua_newstate`.
 
-### Phase 4: Enable UserFiltersStage in WASM pipeline
+### Phase 4: Enable UserFiltersStage in WASM pipeline ✅
 
-- [ ] In `quarto-core/src/pipeline.rs`, add `UserFiltersStage` to the WASM pipeline
-- [ ] Wire up VFS-based filter file reading
-- [ ] Test with a simple filter
+- [x] In `quarto-core/src/pipeline.rs`, add `UserFiltersStage` to the WASM pipeline
+- [x] Wire up VFS-based filter file reading (threaded `Arc<dyn SystemRuntime>` through entire call chain)
+- [x] Use `Lua::new_with()` on WASM to avoid `Lua::new()` trying to disable C modules (our `luaopen_package` stub is empty)
+- [x] Test with a simple filter — end-to-end `upper.lua` filter uppercases content in rendered HTML
 - [ ] Update `hub-client/scripts/build-wasm.js` to use the correct build flags
+
+Changes made:
+- `apply_lua_filter()`, `apply_lua_filters()` in `pampa/src/lua/filter.rs` — accept `Arc<dyn SystemRuntime>`, use `runtime.file_read()` instead of `std::fs::read_to_string()`
+- `apply_filter()`, `apply_filters()` in `pampa/src/unified_filter.rs` — thread runtime through
+- `UserFiltersStage::run()` in `quarto-core` — passes `ctx.runtime.clone()`
+- `pampa/src/main.rs` — passes `NativeRuntime`
+- All test files updated to pass `NativeRuntime`
 
 ### Phase 5: End-to-end demo
 
-- [ ] Create a test .qmd with a Lua filter in the hub-client test fixtures
+- [x] Create a test .qmd with a Lua filter (in test-lua-wasm.mjs end-to-end test)
 - [ ] Build hub-client with WASM Lua support
 - [ ] Run in browser and verify the filter transforms content
 - [ ] Document what works, what doesn't, and what cleanup would be needed

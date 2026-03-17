@@ -20,7 +20,7 @@ use crate::pandoc::{Block, Inline, Pandoc};
 use super::constructors::register_pandoc_namespace;
 use super::mediabag::create_shared_mediabag;
 use super::readwrite::{create_reader_options_table, create_writer_options_table};
-use super::runtime::{SystemRuntime, default_runtime};
+use super::runtime::SystemRuntime;
 use super::types::{LuaBlock, LuaInline, blocks_to_lua_table, inlines_to_lua_table};
 
 // ============================================================================
@@ -100,16 +100,33 @@ pub fn apply_lua_filter(
     context: &ASTContext,
     filter_path: &Path,
     target_format: &str,
+    runtime: Arc<dyn SystemRuntime>,
 ) -> FilterResult<(Pandoc, ASTContext, Vec<DiagnosticMessage>)> {
-    // Read filter file
-    let filter_source = std::fs::read_to_string(filter_path)
-        .map_err(|e| LuaFilterError::FileReadError(filter_path.to_owned(), e))?;
+    // Read filter file via runtime (supports VFS on WASM)
+    let filter_bytes = runtime.file_read(filter_path).map_err(|e| {
+        LuaFilterError::FileReadError(
+            filter_path.to_owned(),
+            std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+        )
+    })?;
+    let filter_source = String::from_utf8(filter_bytes).map_err(|e| {
+        LuaFilterError::FileReadError(
+            filter_path.to_owned(),
+            std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()),
+        )
+    })?;
 
     // Create Lua state
+    // On WASM, we can't load all libraries (no package/io/os/debug support),
+    // so use a restricted set. On native, load everything for full compatibility.
+    #[cfg(target_arch = "wasm32")]
+    let lua = {
+        use mlua::StdLib;
+        let libs = StdLib::COROUTINE | StdLib::TABLE | StdLib::STRING | StdLib::UTF8 | StdLib::MATH;
+        Lua::new_with(libs, mlua::LuaOptions::default()).map_err(|e| LuaFilterError::LuaError(e))?
+    };
+    #[cfg(not(target_arch = "wasm32"))]
     let lua = Lua::new();
-
-    // Create runtime for system operations
-    let runtime: Arc<dyn SystemRuntime> = Arc::new(default_runtime());
 
     // Create mediabag for storing media items
     // In the future, this could be pre-populated from the document or passed in
@@ -190,6 +207,7 @@ pub fn apply_lua_filters(
     context: ASTContext,
     filter_paths: &[std::path::PathBuf],
     target_format: &str,
+    runtime: Arc<dyn SystemRuntime>,
 ) -> FilterResult<(Pandoc, ASTContext, Vec<DiagnosticMessage>)> {
     let mut current_pandoc = pandoc;
     let mut current_context = context;
@@ -201,6 +219,7 @@ pub fn apply_lua_filters(
             &current_context,
             filter_path,
             target_format,
+            runtime.clone(),
         )?;
         current_pandoc = new_pandoc;
         current_context = new_context;
