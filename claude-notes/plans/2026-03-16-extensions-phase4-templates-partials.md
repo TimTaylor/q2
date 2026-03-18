@@ -1,7 +1,7 @@
 # Extensions Phase 4: Template and Partial Support
 
 **Created**: 2026-03-16
-**Status**: Not started
+**Status**: Complete
 **Parent Plan**: `claude-notes/plans/2026-03-16-extensions-master-plan.md`
 **Depends on**: Phase 1 (complete)
 
@@ -80,10 +80,14 @@ addresses this.
 
 ### Apply template stage (`quarto-core/src/stage/stages/apply_template.rs`)
 
-- `ApplyTemplateConfig` has `template: Option<Template>` -- if set, uses it;
-  otherwise calls `render_with_format()` for built-in selection
+- `ApplyTemplateConfig` has `template: Option<Template>` and
+  `HtmlRenderConfig` has `template: Option<&Template>` -- but both are
+  **dead code**: never set to `Some(...)`, never wired through. Introduced
+  in `806703bd` as aspirational plumbing. Phase 4.pre removes them.
 - The stage receives `RenderedOutput` which includes `metadata: ConfigValue`
   (the fully merged metadata from MetadataMergeStage)
+- After Phase 4.pre cleanup, the stage will only use `render_with_format()`
+  for built-in selection. Phase 4.3 adds metadata-driven template selection.
 
 ### Extension metadata flow (Phase 1, complete)
 
@@ -128,12 +132,53 @@ filters/shortcodes should migrate to this pattern too (conclusion: no).
 
 **Where to compile the template**: In `ApplyTemplateStage::run()`. The stage
 already has access to the merged metadata. After merge, `template` is a
-resolved path string. The stage reads it, compiles with partials, renders.
+path string **relative to the document dir** (rebased by
+`adjust_paths_to_document_dir` in Phase 4.1). The stage resolves it to
+absolute via `ctx.document.input.parent().join(template_path)`, reads it, compiles
+with partials, renders.
 
 **How to read template/partial files**: Always use `ctx.runtime.file_read_string()`
 (never `std::fs`). This ensures WASM VFS compatibility. The template content is
 read into a String, then compiled with `Template::compile_with_resolver()`.
 `Template::compile_from_file()` is NOT used (it calls `std::fs` internally).
+
+**Important**: After `adjust_paths_to_document_dir`, all template/partial
+paths are relative to the document dir. They must be joined with
+`ctx.document.input.parent()` before passing to `runtime.file_read_string()`.
+
+**How to render with a custom template**: Refactor `render_with_format()` to
+extract the shared context-building logic into a new `render_with_template()`:
+
+```rust
+pub fn render_with_template(
+    template: &Template,
+    body: &str,
+    meta: &ConfigValue,
+    format: &Format,
+    css_paths: &[String],
+) -> Result<String>
+```
+
+This function builds the `TemplateContext` (body, metadata via
+`add_metadata_to_context_except`, combined CSS list), then renders with the
+given template. **Full-template extras** (`version`, `page-layout`) are
+**always injected** — custom templates may reference `$version$` or
+`$page-layout$`, and unused variables are harmlessly ignored. This avoids
+needing a `is_full` flag and gives custom templates the same rich context as
+built-in ones.
+
+`render_with_format()` becomes a thin wrapper: select built-in template, call
+`render_with_template()`. `render_with_resources()` also delegates to
+`render_with_template()` (passing `default_html_template()`). Custom templates
+from metadata call `render_with_template()` directly with their compiled
+template. This ensures all rendering paths share the same context-building
+logic.
+
+**Missing partial files are errors**: If an extension declares
+`template-partials: [foo.html]` and `foo.html` cannot be read, this is a hard
+error with a clear message (extension name, partial path, underlying IO error).
+TS Quarto treats this as an error too. Silent fallback would hide
+misconfigured extensions.
 
 **Resolver strategy**: There are three cases:
 
@@ -166,11 +211,44 @@ behavior. Confirmed via deepwiki and `quarto-doctemplate` test suite.
 in `template.rs` (line 387). Currently only `"css"` is excluded. This affects:
 - `render_with_format()` (line 338) -- already uses `_except` variant
 - `render_with_resources()` (line 294) -- already uses `_except` variant
-- `render_with_custom_template()` (line 267) -- currently uses
-  `add_metadata_to_context()` with NO exclusions; must switch to
+- `render_with_custom_template()` is removed in Phase 4.pre.5; the new
+  custom template rendering path in Phase 4.3 must use
   `add_metadata_to_context_except()` with the same exclusion list
 
 ## Work Items
+
+### Phase 4.pre: Remove dead template plumbing
+
+`ApplyTemplateConfig.template` and `HtmlRenderConfig.template` were introduced
+in `806703bd` (Jan 6, 2026) as forward-looking infrastructure. They have
+**never been used**: no caller sets `template: Some(...)`, the wire-through
+from `HtmlRenderConfig` → `ApplyTemplateConfig` was never implemented
+(see TODO at `pipeline.rs:375`), and no tests exercise them. Phase 4 replaces
+this dead plumbing with metadata-driven template selection.
+
+- [x] **4.pre.1** Remove `template: Option<Template>` from `ApplyTemplateConfig`
+  and the `with_template()` builder method in `apply_template.rs`.
+
+- [x] **4.pre.2** Remove the `match &self.config.template` branch in
+  `ApplyTemplateStage::run()` (lines 153-176). Replace with direct call to
+  `render_with_format()` (the current `None` branch). Phase 4.3 will later
+  add metadata-driven template selection here.
+
+- [x] **4.pre.3** Remove `template: Option<&'a Template>` from
+  `HtmlRenderConfig` and the `with_template()` builder method in `pipeline.rs`.
+  Update the condition at line 373 to only check `!config.css_paths.is_empty()`.
+  Remove the TODO comment at line 375.
+
+- [x] **4.pre.4** Update `render_to_file.rs:206` to remove `template: None`
+  from the `HtmlRenderConfig` literal.
+
+- [x] **4.pre.5** Remove `render_with_custom_template()` from `template.rs`.
+  It was only called from the `ApplyTemplateConfig.template` branch removed
+  in 4.pre.2. Phase 4.3 will introduce a new metadata-driven rendering path
+  that compiles templates on-the-fly with resolvers, replacing this function.
+
+- [x] **4.pre.6** Verify `cargo build --workspace` passes after removal.
+  Also verified: `cargo nextest run --workspace` — 6684 tests pass, 0 failures.
 
 ### Phase 4.0: RuntimeResolver -- WASM-compatible partial resolution
 
@@ -190,112 +268,103 @@ on `quarto-system-runtime`), the `RuntimeResolver` must live in `quarto-core`
 
 ### Phase 4.1: Path resolution for extension template values
 
-- [ ] **4.1.1** In `parse_formats()` (`extension/read.rs`), remove the
-  underscore prefix from `_ext_dir` and use it to walk the format config.
-  Convert `template` (string) and `template-partials` (array of strings)
-  from `ConfigValueKind::Scalar` to `ConfigValueKind::Path`. This marks them
-  for path adjustment during merge.
+- [x] **4.1.1** In `parse_formats()` (`extension/read.rs`), added
+  `mark_path_valued_keys()` helper that converts `template` (scalar) and
+  `template-partials` (array of scalars) from `ConfigValueKind::Scalar` to
+  `ConfigValueKind::Path`. Applied after merge, before inserting into result.
 
-- [ ] **4.1.2** Change `build_extension_metadata_layer()` in `metadata_merge.rs`
-  (line 86) to return `Option<(ConfigValue, PathBuf)>` instead of
-  `Option<ConfigValue>`. The `PathBuf` is `ext.path.clone()` from the matched
-  `Extension` struct (which already stores the absolute extension dir).
+- [x] **4.1.2** Changed `build_extension_metadata_layer()` in `metadata_merge.rs`
+  to return `Option<(ConfigValue, PathBuf)>`. The `PathBuf` is
+  `ext.path.clone()` from the matched `Extension` struct.
 
-- [ ] **4.1.3** In `MetadataMergeStage::run()`, after getting the extension
-  layer (line 202), destructure the tuple and call
-  `adjust_paths_to_document_dir(&mut ext_config, &extension_dir, &document_dir)`
-  on it, just like the project layer already does at line 197.
+- [x] **4.1.3** In `MetadataMergeStage::run()`, the extension layer call now
+  uses `.map()` to destructure the tuple and call
+  `adjust_paths_to_document_dir(&mut config, &ext_dir, &document_dir)`.
 
-- [ ] **4.1.4** Tests:
-  - Verify that after `parse_formats()`, `template` and `template-partials`
-    values are `ConfigValueKind::Path`
-  - Verify that after metadata merge, extension `!path` values are rebased
-    correctly from extension dir to document dir
-  - Verify non-path metadata (e.g., `toc: true`) is unaffected
+- [x] **4.1.4** Tests (3 new in read.rs, 1 updated in metadata_merge.rs):
+  - `test_template_converted_to_path_kind`: verifies `template` is `Path`
+  - `test_template_partials_converted_to_path_kind`: verifies array elements are `Path`
+  - `test_non_path_metadata_unaffected_by_path_conversion`: verifies `toc`, `theme` etc unchanged
+  - Updated `test_build_extension_metadata_layer_basic` to destructure tuple and verify ext_path
 
 ### Phase 4.2: Extract template config from merged metadata
 
-- [ ] **4.2.1** In `ApplyTemplateStage::run()`, after receiving `RenderedOutput`,
-  extract `template` and `template-partials` from `rendered.metadata`:
-  ```rust
-  let custom_template_path = metadata.get("template").and_then(|v| v.as_str());
-  let partial_paths: Vec<String> = metadata.get("template-partials")
-      .and_then(|v| v.as_array())
-      .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-      .unwrap_or_default();
-  ```
-- [ ] **4.2.2** Tests: verify extraction works for present/absent/empty values
+- [x] **4.2.1** In `ApplyTemplateStage::run()`, extract `template` and
+  `template-partials` from `rendered.metadata`. Implemented inline in the
+  `run()` method alongside the Phase 4.3 template selection logic.
+
+- [x] **4.2.2** Tests: covered by Phase 4.5 integration tests (extraction is
+  tested implicitly through the full rendering pipeline).
 
 ### Phase 4.3: Compile and apply extension templates
 
-- [ ] **4.3.1** Custom template, no explicit partials: read template content
-  via `ctx.runtime.file_read_string(path)`, compile with `RuntimeResolver`
-  backed by `ctx.runtime`
+- [x] **4.3.0** Refactored into `render_with_compiled_template()` in
+  `template.rs`. Both `render_with_format()` and `render_with_resources()`
+  now delegate to it. Full-template extras (version, page-layout) always
+  injected. All 66 template tests pass unchanged.
 
-- [ ] **4.3.2** Custom template + explicit `template-partials`: read all
-  partial files via `ctx.runtime.file_read_string()`, build `MemoryResolver`
-  keyed by file stem, chain with `RuntimeResolver`, compile template with
-  `ChainedResolver`
+- [x] **4.3.1** Custom template, no explicit partials: implemented in
+  `ApplyTemplateStage::run()` using `RuntimeResolver`.
 
-- [ ] **4.3.3** No custom template + explicit `template-partials`: build
-  `MemoryResolver`, compile built-in template (minimal or full) with it.
-  New function in `template.rs`:
-  ```rust
-  pub fn compile_builtin_template_with_partials(
-      meta: &ConfigValue,
-      resolver: &impl PartialResolver,
-  ) -> Result<Template>
-  ```
+- [x] **4.3.2** Custom template + explicit partials: implemented with
+  `ChainedResolver` (MemoryResolver → RuntimeResolver). `build_partial_resolver()`
+  helper reads partial content via runtime, keys by file stem.
 
-- [ ] **4.3.4** When neither is set: existing behavior unchanged (regression)
+- [x] **4.3.3** No custom template + explicit partials: implemented via
+  `compile_builtin_template_with_partials()` in `template.rs`.
 
-- [ ] **4.3.5** Error handling: if template file doesn't exist or can't be
-  compiled, produce a clear error with the extension name and path
+- [x] **4.3.4** When neither is set: falls through to `render_with_format()`
+  — existing behavior unchanged.
+
+- [x] **4.3.5** Error handling: all three cases produce hard errors with
+  descriptive messages (path + underlying error).
 
 ### Phase 4.4: Strip template keys from template context
 
-- [ ] **4.4.1** In `template.rs`, add `"template"` and `"template-partials"`
-  to the exclusion list used by `add_metadata_to_context_except()` (line 387).
-  Currently only `"css"` is excluded. This affects `render_with_format()`
-  (line 338) and `render_with_resources()` (line 294) which already use the
-  `_except` variant.
+- [x] **4.4.1** Updated `render_with_compiled_template()` to exclude
+  `["css", "template", "template-partials"]` from the template context.
+  All rendering paths go through this single function.
 
-- [ ] **4.4.2** Change `render_with_custom_template()` (line 267) to use
-  `add_metadata_to_context_except()` instead of `add_metadata_to_context()`,
-  with the same exclusion list (`["css", "template", "template-partials"]`).
-
-- [ ] **4.4.3** Test: verify `$template$` does not render in output when
-  extension provides a template path
+- [x] **4.4.3** Test: `test_template_key_not_in_output` verifies `$template$`
+  resolves to empty, not the template path
 
 ### Phase 4.5: Integration tests
 
-- [ ] **4.5.1** Unit test: extension provides custom template -> output uses
-  that template's structure
-- [ ] **4.5.2** Unit test: extension provides custom template + explicit
-  partials -> partials override filesystem partials
-- [ ] **4.5.3** Unit test: extension provides only template-partials (no
-  custom template) -> partials available when compiling built-in template
-- [ ] **4.5.4** Unit test: document metadata `template` overrides extension
-  `template` (higher precedence in merge)
-- [ ] **4.5.5** Unit test: no template/partials -> existing behavior unchanged
-- [ ] **4.5.6** Integration test in `ApplyTemplateStage` with mock metadata
-  containing template path
+- [x] **4.5.1** `test_custom_template_from_metadata`: custom template -> output
+  uses that template's structure
+- [x] **4.5.2** `test_custom_template_with_partials`: custom template + explicit
+  partials -> partial content appears in output
+- [x] **4.5.3** (Deferred — built-in templates don't use partials yet, so the
+  "only partials, no custom template" path is a no-op today. Infrastructure
+  is in place for when built-in templates add partials.)
+- [x] **4.5.4** `test_document_template_overrides_extension`: document metadata
+  `template` value wins after merge
+- [x] **4.5.5** `test_no_template_no_partials_existing_behavior`: existing
+  built-in template behavior unchanged
+- [x] **4.5.6** `test_template_key_not_in_output`: verifies `$template$` is
+  stripped from context (Phase 4.4.3)
+- [x] **4.5.7** `test_missing_template_file_errors`: hard error when template
+  file doesn't exist
 
 ### Phase 4.6: Smoke Tests
 
-- [ ] **4.6.1** Create `extensions/custom-template/` smoke test:
-  - Extension with a simple custom HTML template
-  - Verify output matches custom template structure (not built-in)
+- [x] **4.6.1** Created `extensions/custom-template/` smoke test with
+  `custom-tmpl` extension providing `template.html`. Verifies
+  `CUSTOM-TEMPLATE-ACTIVE` marker and `div.custom-template-marker` element.
 
-- [ ] **4.6.2** Create `extensions/template-partials/` smoke test:
-  - Extension with a custom template that uses `$header()$` partial
-  - Extension provides the partial file
-  - Verify partial content appears in output
+- [x] **4.6.2** Created `extensions/template-partials/` smoke test with
+  `partial-ext` extension providing template + `header.html` partial.
+  Verifies `PARTIAL-HEADER-CONTENT` and `header.ext-header` element.
 
 ### Phase 4.7: Workspace Verification
 
-- [ ] **4.7.1** `cargo build --workspace`
-- [ ] **4.7.2** `cargo nextest run --workspace`
+- [x] **4.7.1** `cargo build --workspace` — clean build
+- [x] **4.7.2** `cargo nextest run --workspace` — 6693 tests pass, 0 failures
+
+### Phase 4.8: Update master plan
+
+- [x] **4.8.1** Updated `claude-notes/plans/2026-03-16-extensions-master-plan.md`
+  to mark Phase 4 complete with summary of changes.
 
 ---
 
@@ -303,45 +372,76 @@ on `quarto-system-runtime`), the `RuntimeResolver` must live in `quarto-core`
 
 | File | Action | Description |
 |------|--------|-------------|
-| `crates/quarto-doctemplate/src/resolver.rs` | Modify | Add `ChainedResolver` |
-| `crates/quarto-core/src/template.rs` | Modify | Add `RuntimeResolver`, `compile_builtin_template_with_partials()`, update exclusion lists in all three render functions |
-| `crates/quarto-core/src/extension/read.rs` | Modify | Convert `template`/`template-partials` to `ConfigValueKind::Path` in `parse_formats()`, remove `_` prefix from `ext_dir` |
-| `crates/quarto-core/src/stage/stages/metadata_merge.rs` | Modify | Return `(ConfigValue, PathBuf)` from `build_extension_metadata_layer`, call `adjust_paths_to_document_dir` on extension layer |
-| `crates/quarto-core/src/stage/stages/apply_template.rs` | Modify | Extract template config from metadata, compile with resolver via runtime |
-| `crates/quarto/tests/smoke-all/extensions/custom-template/` | Create | Smoke test |
-| `crates/quarto/tests/smoke-all/extensions/template-partials/` | Create | Smoke test |
+| `crates/quarto-core/src/stage/stages/apply_template.rs` | Modify | (4.pre) Remove dead `ApplyTemplateConfig.template`; (4.2-4.3) extract template from metadata, compile with resolver via runtime |
+| `crates/quarto-core/src/pipeline.rs` | Modify | (4.pre) Remove dead `HtmlRenderConfig.template`, clean up TODO |
+| `crates/quarto-core/src/render_to_file.rs` | Modify | (4.pre) Remove `template: None` from config literal |
+| `crates/quarto-core/src/template.rs` | Modify | (4.pre) Remove `render_with_custom_template()`; (4.0) Add `RuntimeResolver`; (4.3) Refactor: extract `render_with_template()` from `render_with_format()` and `render_with_resources()`, add `compile_builtin_template_with_partials()`; (4.4) Update exclusion list in `render_with_template()` |
+| `crates/quarto-doctemplate/src/resolver.rs` | Modify | (4.0) Add `ChainedResolver` |
+| `crates/quarto-core/src/extension/read.rs` | Modify | (4.1) Convert `template`/`template-partials` to `ConfigValueKind::Path` in `parse_formats()` |
+| `crates/quarto-core/src/stage/stages/metadata_merge.rs` | Modify | (4.1) Return `(ConfigValue, PathBuf)` from `build_extension_metadata_layer`, call `adjust_paths_to_document_dir` on extension layer |
+| `crates/quarto/tests/smoke-all/extensions/custom-template/` | Create | (4.6) Smoke test |
+| `crates/quarto/tests/smoke-all/extensions/template-partials/` | Create | (4.6) Smoke test |
 
 ## Key APIs
 
-**Reading partial files into MemoryResolver** (via runtime, not std::fs):
+**Resolving metadata paths to absolute** (required before any file read):
+```rust
+let document_dir = ctx.document.input.parent()
+    .unwrap_or_else(|| Path::new("."));
+let abs_template_path = document_dir.join(template_path);
+```
+
+All template/partial paths from metadata are relative to the document dir
+after `adjust_paths_to_document_dir`. They must be joined with
+the document dir before passing to `runtime.file_read_string()`.
+Use the same fallback as `MetadataMergeStage` (line 190-194).
+
+**Reading partial files into MemoryResolver** (via runtime, errors on missing):
 ```rust
 fn build_partial_resolver(
     partial_paths: &[String],
+    document_dir: &Path,
     runtime: &dyn SystemRuntime,
-) -> MemoryResolver {
+) -> Result<MemoryResolver> {
     let mut resolver = MemoryResolver::new();
     for path_str in partial_paths {
         let path = Path::new(path_str);
-        if let Ok(content) = runtime.file_read_string(path) {
-            let name = path.file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or(path_str);
-            resolver.add(name, content);
-        }
+        let abs_path = document_dir.join(path);
+        let content = runtime.file_read_string(&abs_path)
+            .map_err(|e| /* error with partial path and IO details */)?;
+        let name = path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(path_str);
+        resolver.add(name, content);
     }
-    resolver
+    Ok(resolver)
 }
 ```
 
 **Compiling template from runtime-read content**:
 ```rust
-let template_content = ctx.runtime.file_read_string(Path::new(template_path))?;
+let document_dir = ctx.document.input.parent().unwrap_or_else(|| Path::new("."));
+let abs_path = document_dir.join(template_path);
+let template_content = ctx.runtime.file_read_string(&abs_path)?;
 let runtime_resolver = RuntimeResolver::new(ctx.runtime.as_ref());
 let template = Template::compile_with_resolver(
     &template_content,
-    Path::new(template_path),
+    &abs_path,
     &runtime_resolver,
     0,
+)?;
+```
+
+**Rendering** (both custom and built-in go through the same function):
+```rust
+// Custom template from metadata:
+let html = template::render_with_template(
+    &compiled_template, &rendered.content, &metadata, &rendered.format, &css_paths,
+)?;
+
+// Built-in template (render_with_format now delegates to render_with_template):
+let html = template::render_with_format(
+    &rendered.content, &metadata, &rendered.format, &css_paths,
 )?;
 ```
 
@@ -380,3 +480,272 @@ let template = Template::compile_with_resolver(
    See separate investigation:
    `claude-notes/investigations/2026-03-16-investigate-extension-path-resolution.md`
    Conclusion: No. Absolute is correct for execution paths, `!path` for metadata.
+
+---
+
+## Codebase Reference
+
+This section provides the concrete details an implementer needs without
+requiring independent codebase exploration.
+
+### Key structs and their fields
+
+**`StageContext`** (`quarto-core/src/stage/context.rs:46`):
+```rust
+pub struct StageContext {
+    pub runtime: Arc<dyn SystemRuntime>,  // filesystem, env, subprocesses
+    pub format: Format,                    // output format (e.g., html)
+    pub project: ProjectContext,           // project root, config, files
+    pub document: DocumentInfo,            // input/output paths
+    pub extensions: Vec<Extension>,        // discovered extensions
+    pub artifacts: ArtifactStore,          // stored artifacts (CSS, etc.)
+    pub diagnostics: Vec<DiagnosticMessage>,
+    // ...
+}
+```
+
+**`DocumentInfo`** (`quarto-core/src/project.rs:305`):
+```rust
+pub struct DocumentInfo {
+    pub input: PathBuf,           // absolute input file path
+    pub output: Option<PathBuf>,  // absolute output path
+    pub title: Option<String>,
+    pub id: Option<String>,
+}
+```
+**No `dir()` method.** Get document dir via `ctx.document.input.parent()`.
+This matches how `MetadataMergeStage` computes it at line 190:
+```rust
+let document_dir = doc.path.parent()
+    .map(|p| p.to_path_buf())
+    .unwrap_or_else(|| ctx.project.dir.clone());
+```
+
+**`Extension`** (`quarto-core/src/extension/types.rs:55`):
+```rust
+pub struct Extension {
+    pub id: ExtensionId,          // name + optional organization
+    pub title: String,
+    pub author: String,
+    pub version: Option<String>,
+    pub quarto_required: Option<String>,
+    pub path: PathBuf,            // ABSOLUTE path to extension directory
+    pub contributes: Contributes,
+}
+```
+
+**`Contributes`** (`quarto-core/src/extension/types.rs:71`):
+```rust
+pub struct Contributes {
+    pub formats: HashMap<String, ConfigValue>,  // format metadata
+    pub filters: Vec<ExtensionFilter>,          // absolute paths
+    pub shortcodes: Vec<PathBuf>,               // absolute paths
+}
+```
+
+**`RenderedOutput`** (`quarto-core/src/stage/data.rs:327`):
+```rust
+pub struct RenderedOutput {
+    pub input_path: PathBuf,
+    pub output_path: PathBuf,
+    pub format: Format,
+    pub content: String,          // HTML body content
+    pub is_intermediate: bool,
+    pub supporting_files: Vec<PathBuf>,
+    pub metadata: ConfigValue,    // fully merged metadata from MetadataMergeStage
+}
+```
+
+### ConfigValue API (`quarto-pandoc-types/src/config_value.rs`)
+
+```rust
+// Key methods used in this plan:
+impl ConfigValue {
+    pub fn get(&self, key: &str) -> Option<&ConfigValue>    // map lookup
+    pub fn as_str(&self) -> Option<&str>                     // Scalar(String), Path, Glob, Expr
+    pub fn as_array(&self) -> Option<&[ConfigValue]>         // Array variant
+    pub fn as_bool(&self) -> Option<bool>                    // Scalar(Boolean)
+}
+
+// ConfigValueKind variants relevant to this plan:
+enum ConfigValueKind {
+    Scalar(Yaml),          // plain YAML values
+    Path(String),          // !path tag — adjusted by adjust_paths_to_document_dir
+    Array(Vec<ConfigValue>),
+    Map(Vec<ConfigMapEntry>),
+    // ... others
+}
+```
+
+**Important**: `as_str()` returns `Some` for both `Scalar(String)` AND `Path`
+variants. So after converting to `ConfigValueKind::Path` in Phase 4.1, the
+extraction in Phase 4.2 (`metadata.get("template").and_then(|v| v.as_str())`)
+works without changes.
+
+### Template engine API (`quarto-doctemplate`)
+
+```rust
+// Compile a template with partial resolution:
+Template::compile_with_resolver(
+    source: &str,           // template content as string
+    template_path: &Path,   // path (for partial resolution base dir)
+    resolver: &impl PartialResolver,
+    depth: usize,           // 0 for top-level
+) -> TemplateResult<Template>
+
+// Resolver types:
+MemoryResolver::new() -> MemoryResolver
+MemoryResolver::add(&mut self, name: impl Into<String>, content: impl Into<String>)
+ChainedResolver::new(primary: A, fallback: B) -> ChainedResolver<A, B>
+RuntimeResolver::new(runtime: &dyn SystemRuntime) -> RuntimeResolver  // in quarto-core
+
+// Resolve partial path from name + base template path:
+resolve_partial_path(name: &str, base_path: &Path) -> PathBuf
+// e.g., ("header", "/ext/template.html") → "/ext/header.html"
+```
+
+### Current `render_with_format()` logic (`template.rs:338-383`)
+
+This is one of two functions that Phase 4.3.0 refactors (the other is
+`render_with_resources()` at line 294, which has similar logic but uses
+`default_html_template()` and omits step 6). Current steps:
+1. `is_minimal_html(meta)` → select minimal or full built-in template
+2. Create `TemplateContext`, insert `"body"`
+3. `add_metadata_to_context_except(meta, &mut ctx, &["css"])` — all metadata
+   except `css`
+4. Build combined CSS: `css_paths` param + `extract_css_from_meta(meta)`
+5. Insert `"css"` as list
+6. If full template: insert `"version"` (from `CARGO_PKG_VERSION`), default
+   `"page-layout"` to `"article"` if not already set
+7. `template.render(&ctx)`
+
+After refactoring, `render_with_template()` performs steps 2-7 (always
+including step 6 — unused variables are harmlessly ignored). Both
+`render_with_format()` and `render_with_resources()` become thin wrappers
+that select the template (step 1) and delegate.
+
+### Current `ApplyTemplateStage::run()` logic (`apply_template.rs:119-189`)
+
+1. Extract `RenderedOutput` from input
+2. Store CSS artifact if not already set by `CompileThemeCssStage`
+3. Clone metadata from rendered output
+4. Branch on `self.config.template` (dead code — always `None`):
+   - `Some(template)`: call `render_with_custom_template` **(removed in 4.pre)**
+   - `None`: compute CSS paths (default or from config), call `render_with_format`
+5. Replace `rendered.content` with full HTML
+
+CSS path computation in the `None` branch (lines 161-165):
+```rust
+let css_paths: Vec<String> = if self.config.css_paths.is_empty() {
+    vec![DEFAULT_CSS_ARTIFACT_PATH.to_string()]
+} else {
+    self.config.css_paths.clone()
+};
+```
+
+### Current `parse_formats()` (`extension/read.rs:179-211`)
+
+```rust
+fn parse_formats(
+    formats_cv: &ConfigValue,
+    _ext_dir: &Path,           // ← unused, needs underscore removed in 4.1.1
+) -> Result<HashMap<String, ConfigValue>>
+```
+Iterates format entries, merges "common" key into each format. Returns
+format name → ConfigValue map. Phase 4.1.1 adds a post-processing step
+to walk each format's ConfigValue and convert `template` / `template-partials`
+from `Scalar` to `Path`.
+
+### Current `build_extension_metadata_layer()` (`metadata_merge.rs:86-112`)
+
+```rust
+fn build_extension_metadata_layer(
+    extensions: &[Extension],
+    target_format: &str,
+) -> Option<ConfigValue>
+```
+Parses format descriptor, finds matching extension, looks up format metadata
+by base format and exact match, merges if both exist. Phase 4.1.2 changes
+return to `Option<(ConfigValue, PathBuf)>` where `PathBuf` is `ext.path.clone()`.
+
+### Current `MetadataMergeStage::run()` extension layer usage (line 202)
+
+```rust
+let extension_layer = build_extension_metadata_layer(&ctx.extensions, target_format);
+// ...
+if let Some(ref ext) = extension_layer {
+    layers.push(ext);
+}
+```
+Phase 4.1.3 destructures the tuple and adds `adjust_paths_to_document_dir`:
+```rust
+let (extension_layer, extension_dir) = match build_extension_metadata_layer(...) {
+    Some((mut config, dir)) => {
+        adjust_paths_to_document_dir(&mut config, &dir, &document_dir);
+        (Some(config), Some(dir))
+    }
+    None => (None, None),
+};
+```
+
+### `adjust_paths_to_document_dir()` (`project.rs:180-186`)
+
+```rust
+pub(crate) fn adjust_paths_to_document_dir(
+    metadata: &mut ConfigValue,
+    metadata_dir: &Path,    // where the paths are relative to (e.g., ext dir)
+    document_dir: &Path,    // where to rebase to (document's parent dir)
+)
+```
+Recursively walks ConfigValue. For `ConfigValueKind::Path` values that are
+relative: joins with `metadata_dir` to get absolute, then `pathdiff::diff_paths`
+against `document_dir` to get relative-to-document.
+
+Example: extension at `/project/_extensions/acm/`, document at `/project/posts/`:
+- Input: `ConfigValueKind::Path("template.html")`
+- `metadata_dir.join("template.html")` → `/project/_extensions/acm/template.html`
+- `diff_paths(abs, document_dir)` → `../_extensions/acm/template.html`
+- Result: `ConfigValueKind::Path("../_extensions/acm/template.html")`
+
+Then in `ApplyTemplateStage`, resolve back to absolute:
+`document_dir.join("../_extensions/acm/template.html")` →
+`/project/_extensions/acm/template.html`
+
+### Smoke test pattern (`crates/quarto/tests/smoke-all/`)
+
+Each `.qmd` file embeds assertions in `_quarto.tests` frontmatter. The
+`smoke_all` test runner (`crates/quarto/tests/smoke_all.rs`) discovers all
+`.qmd` files via `walkdir` and runs each through `quarto_test::run_test_file`.
+
+Example fixture:
+```yaml
+---
+title: Basic Render Test
+format: html
+_quarto:
+  tests:
+    html:
+      noErrors: true
+      ensureFileRegexMatches:
+        - ["<!DOCTYPE html>", "<title>Basic Render Test</title>"]
+        - ["ERROR"]
+---
+Content here.
+```
+
+For extension smoke tests, the fixture directory needs:
+- `_quarto.yml` with project config
+- `_extensions/<name>/_extension.yml` with extension config
+- `_extensions/<name>/template.html` (or partials)
+- A `.qmd` file with assertions
+
+Run with: `cargo nextest run -p quarto --test smoke_all`
+
+### Testing guidelines
+
+- Use `cargo nextest run` (never `cargo test`)
+- Do NOT pipe nextest through `tail` — it hangs
+- Write tests BEFORE implementation (TDD)
+- After changes, run full workspace: `cargo nextest run --workspace`
+- For quarto-core changes, also run `cargo xtask verify`
+- See `claude-notes/instructions/testing.md` for detailed conventions
