@@ -9,11 +9,11 @@
     "test:ts-server": "vitest run --reporter=verbose -t 'ts-sync-server'"
   },
   "dependencies": {
-    "@quarto/quarto-sync-client": "*",
-    "@quarto/quarto-automerge-schema": "*"
+    "@quarto/quarto-automerge-schema": "*",
+    "@quarto/quarto-sync-client": "*"
   },
   "devDependencies": {
     "typescript": "~5.9.3",
-    "vitest": "^3.1.1"
+    "vitest": "^4.1.0"
   }
 }
