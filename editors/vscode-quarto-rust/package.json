@@ -85,7 +85,7 @@
     "test": "npm run compile && node ./out/test/runTest.js"
   },
   "dependencies": {
-    "vscode-languageclient": "^9.0.1"
+    "vscode-languageclient": "^10.1.0"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
